@@ -1,19 +1,5 @@
-import groovy.json.JsonOutput
-
 pipeline {
     agent any
-    environment {
-        MVN_HOME = tool 'Jenkins_Maven_3_9_6'  // Jenkins에서 설정한 Maven 설치의 이름입니다.
-        REDMINE_URL = 'http://192.168.11.18:3000'
-//집        REDMINE_URL = 'http://192.168.35.209:3000'
-        REDMINE_API_KEY = credentials('redmine-api-key')
-        REDMINE_PROJECT_ID = 'testproject'
-
-        SONAR_HOST_URL = "http://192.168.11.18:9001" // SonarQube 서버 URL
-//집        SONAR_HOST_URL = "http://192.168.35.209:9001" // SonarQube 서버 URL
-        SONARQUBE_API_KEY = credentials('sonarqube_token')
-//        SONAR_PROJECT_KEY = 'MavenModule1Key'
-    }
     stages {
         stage('Checkout') {
             steps {
@@ -23,147 +9,34 @@ pipeline {
 
         stage('SonarQube Scan') {
             steps {
-                /*
-                // Maven 프로젝트 스캔
-                dir('sonar-scanner-maven/maven-basic') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh '${MVN_HOME}/bin/mvn clean verify sonar:sonar \
-                        -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                        -Dsonar.projectName="MavenModule 1" \
-                        -Dsonar.plugins.downloadOnlyRequired=true'
-                    }
-                }
-                
-                
-                dir('sonar-scanner-maven/maven-multilingual') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh '${MVN_HOME}/bin/mvn clean verify sonar:sonar \
-                        -Dsonar.projectKey=MavenModule2Key \
-                        -Dsonar.projectName="MavenModule 2" \
-                        -Dsonar.plugins.downloadOnlyRequired=true'
-                    }
-                }
-
-                dir('sonar-scanner-maven/maven-multimodule') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh '${MVN_HOME}/bin/mvn -T clean verify sonar:sonar \
-                        -Dsonar.projectKey=MavenModule3Key \
-                        -Dsonar.projectName="MavenModule 3" \
-                        -Dsonar.plugins.downloadOnlyRequired=true'
-                    }
-                }
-                */
                 // Gradle 프로젝트 스캔
                 
                 withSonarQubeEnv('SonarQube Server') {
-                    sh 'chmod +x ./gradlew'
+                    sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
                     sh './gradlew clean build \
                     -Dsonar.projectKey=gradle_sonar_jenkins_redmine \
                     -Dsonar.projectName="gradle_sonar_jenkins_redmine" \
                     -Dsonar.plugins.downloadOnlyRequired=true sonar'
                 }
-                
-
-                /*
-                dir('sonar-scanner-gradle/gradle-kotlin-dsl') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh './gradlew clean build jacocoTestReport \
-                        -Dsonar.projectKey=GradleModule2Key \
-                        -Dsonar.projectName="GradleModule 2" \
-                        -Dsonar.plugins.downloadOnlyRequired=true sonar'
-                    }
-                }
-                
-
-
-                dir('sonar-scanner-gradle/gradle-multimodule') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh './gradlew clean build \
-                        -Dsonar.projectKey=GradleModule3Key \
-                        -Dsonar.projectName="GradleModule 3" \
-                        -Dsonar.plugins.downloadOnlyRequired=true sonar'
-                    }
-                }
-
-                dir('sonar-scanner-gradle/gradle-multimodule-coverage') {
-                    withSonarQubeEnv('SonarQube Server') {
-                        sh './gradlew clean build jacocoTestReport \
-                        -Dsonar.projectKey=GradleModule4Key \
-                        -Dsonar.projectName="GradleModule 4" \
-                        -Dsonar.plugins.downloadOnlyRequired=true sonar'
-                    }
-                }
-                */
-
-                /*
-                // Docker 프로젝트 소스 코드 스캔
-                dir('dockerProject') {
-                    withSonarQubeEnv('YourSonarQubeServerName') {
-                        sh 'sonar-scanner'
-                    }
-                }
-                */
             }
         }
-        stage('Redmine 보고') {
+
+        stage('Trigger Redmine Pipeline') {
             steps {
                 script {
-                    def buildStatus = currentBuild.result
-                    //def sonarQualityGate = currentBuild.rawBuild.getLog(100).find { it =~ /ANALYSIS SUCCESSFUL/ } != null ? 'SUCCESS' : 'FAILED'
-                    def sonarQualityGate = currentBuild.rawBuild.getLogFile().text.contains("ANALYSIS SUCCESSFUL") ? 'SUCCESS' : 'FAILED'
-                    def reportContent = 
-"""
-## 빌드 결과: ${buildStatus}
-## SonarQube 품질 게이트: ${sonarQualityGate}
+                    def upstreamJobs = ["SonarQube Scan"]
 
----
-### 빌드 로그 (일부):
-${currentBuild.rawBuild.getLog(100)}
+                    def allUpstreamSuccess = upstreamJobs.every { jobName ->
+                        def job = Jenkins.instance.getItemByFullName(jobName)
+                        def lastBuild = job.getLastBuild()
+                        return lastBuild && lastBuild.result == 'SUCCESS'
+                    }
 
----
-### SonarQube 분석 결과:
-[SonarQube 링크](${env.SONAR_HOST_URL}/dashboard?id=${env.SONAR_PROJECT_KEY})
-"""
-
-                    def replace_reportContent = JsonOutput.toJson(reportContent.replaceAll(",", "\n"))
-                    echo "${replace_reportContent}"
-
-                    // Redmine API를 사용하여 이슈 생성
-                    
-                    def response = httpRequest httpMode: 'POST', 
-                        url: "${env.REDMINE_URL}/issues.json?key=${env.REDMINE_API_KEY}", 
-                        contentType: 'APPLICATION_JSON',
-                        requestBody: """
-                        {
-                            "issue": {
-                                "project_id": 1,
-                                "tracker_id": 1,
-                                "status_id": 1,
-                                "priority_id": 4,
-                                "subject": "[Jenkins Pipeline] Build & SonarQube Report",
-                                "description": ${replace_reportContent}
-                            }
-                        }
-                        """
-
-/*
-집
-"""
-                        {
-                            "issue": {
-                                "project_id": 2,
-                                "tracker_id": 5,
-                                "status_id": 10,
-                                "priority_id": 3,
-                                "subject": "[Jenkins Pipeline] Build & SonarQube Report",
-                                "description": ${replace_reportContent}
-                            }
-                        }
-                        """
-*/
-
-                    if (response.status != 201) {
-                        error "Redmine 이슈 생성 실패: ${response.content}"
+                    if (allUpstreamSuccess) {
+                        build job: 'report_redmine', wait: false
+                        echo "report_redmine 파이프라인 트리거 완료"
+                    } else {
+                        echo "SonarQube Scan 단계가 실패하여 report_redmine 파이프라인을 트리거하지 않습니다."
                     }
                 }
             }

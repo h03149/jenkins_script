@@ -1,0 +1,33 @@
+pipeline {
+    agent any
+    stages {
+        stage('Get Gradle_Sonar_Jenkins Pipeline Info') {
+            steps {
+                script {
+                    // A 파이프라인 이름
+                    def aPipelineName = "gradle_sonar_jenkins_redmine" 
+
+                    // Jenkins 객체 가져오기
+                    def jenkins = Jenkins.getInstance()
+
+                    // A 파이프라인 객체 가져오기
+                    def aPipeline = jenkins.getItemByFullName(aPipelineName)
+
+                    // 마지막 빌드 객체 가져오기
+                    def lastBuild = aPipeline.getLastBuild()
+
+                    // 빌드 정보 추출
+                    def buildNumber = lastBuild.number
+                    def buildResult = lastBuild.result
+                    def duration = lastBuild.durationString
+
+                    // 정보 출력
+                    echo "A 파이프라인 정보 (빌드 #${buildNumber}):"
+                    echo "- 실행 결과: ${buildResult}"
+                    echo "- 소요 시간: ${duration}"
+                    echo "- 최종 결과: ${buildResult}" // buildResult는 이미 최종 결과를 나타냄 
+                }
+            }
+        }
+    }
+}

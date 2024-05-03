@@ -56,6 +56,7 @@ pipeline {
                 // Gradle 프로젝트 스캔
                 
                 withSonarQubeEnv('SonarQube Server') {
+                    sh 'chmod +x ./gradlew'
                     sh './gradlew clean build \
                     -Dsonar.projectKey=GiteaProject \
                     -Dsonar.projectName="GiteaProject 1" \

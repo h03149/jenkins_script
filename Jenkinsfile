@@ -58,8 +58,8 @@ pipeline {
                 withSonarQubeEnv('SonarQube Server') {
                     sh 'chmod +x ./gradlew'
                     sh './gradlew clean build \
-                    -Dsonar.projectKey=GiteaProject \
-                    -Dsonar.projectName="GiteaProject 1" \
+                    -Dsonar.projectKey=gradle_sonar_jenkins_redmine \
+                    -Dsonar.projectName="gradle_sonar_jenkins_redmine" \
                     -Dsonar.plugins.downloadOnlyRequired=true sonar'
                 }
                 

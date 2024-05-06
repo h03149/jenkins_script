@@ -1,4 +1,4 @@
-@Library('checkUpstreamJobs@main') _
+@Library('checkUpstreamJobs@master') _
 
 pipeline {
     agent any

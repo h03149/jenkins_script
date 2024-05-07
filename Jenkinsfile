@@ -19,14 +19,15 @@ pipeline {
 
         stage('Sonarqube Scan') {
             steps {
-                // Gradle 프로젝트 스캔
-                def repoName = getRepoName(env.GIT_URL)
+                script {
+                    def repoName = getRepoName(env.GIT_URL)
 
-                withSonarQubeEnv('SonarQube Server') {
-                    sh './gradlew \
-                        -Dsonar.projectKey=$repoName \
-                        -Dsonar.projectName="$repoName" \
-                        -Dsonar.plugins.downloadOnlyRequired=true sonar' 
+                    withSonarQubeEnv('SonarQube Server') {
+                        sh './gradlew \
+                            -Dsonar.projectKey=$repoName \
+                            -Dsonar.projectName="$repoName" \
+                            -Dsonar.plugins.downloadOnlyRequired=true sonar' 
+                    }
                 }
             }
         }

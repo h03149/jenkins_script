@@ -27,8 +27,8 @@ pipeline {
 
                     withSonarQubeEnv('SonarQube Server') {
                         sh './gradlew \
-                            -Dsonar.projectKey=$repoName \
-                            -Dsonar.projectName="$repoName" \
+                            -Dsonar.projectKey=${repoName} \
+                            -Dsonar.projectName="${repoName}" \
                             -Dsonar.plugins.downloadOnlyRequired=true sonar' 
                     }
                 }

@@ -22,6 +22,9 @@ pipeline {
                 script {
                     def repoName = getRepoName(env.GIT_URL)
 
+                    echo "$env.GIT_URL"
+                    echo "$repoName"
+
                     withSonarQubeEnv('SonarQube Server') {
                         sh './gradlew \
                             -Dsonar.projectKey=$repoName \

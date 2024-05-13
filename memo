@@ -1,0 +1,32 @@
+pipeline {
+  agent any
+
+  environment {
+    // GitHub 정보
+    GITHUB_REPO = 'https://github.com/your-username/your-repository.git'
+    GITHUB_CREDENTIALS = 'github-credentials-id' 
+
+    // Gitea 정보
+    GITEA_REPO = 'your-username/your-repository.git' // System Gitea Server에 등록된 repo 이름만 사용
+    GITEA_CREDENTIALS = 'gitea-credentials-id' // System Gitea Server에 등록된 자격 증명 ID
+  }
+
+  stages {
+    stage('Checkout from GitHub') {
+      steps {
+        git branch: 'main', credentialsId: env.GITHUB_CREDENTIALS, url: env.GITHUB_REPO
+      }
+    }
+
+    stage('Mirror to Gitea') {
+      steps {
+        giteaPush(
+            credentialsId: env.GITEA_CREDENTIALS, // System Gitea Server에 등록된 자격 증명 ID
+            repo: env.GITEA_REPO, // System Gitea Server에 등록된 repo 이름만 사용
+            forcePush: true, // 필요에 따라 활성화
+            branch: 'main' // Gitea에 푸시할 브랜치 명시
+        )
+      }
+    }
+  }
+}

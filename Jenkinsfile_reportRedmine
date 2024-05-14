@@ -1,0 +1,130 @@
+import groovy.json.JsonOutput
+
+// getBuildInfo 함수를 전역으로 정의합니다.
+@NonCPS
+def getBuildInfo() {
+    // A 파이프라인 이름
+    def aPipelineName = "github_build" 
+
+    // Jenkins 객체에서 A 파이프라인의 마지막 빌드 객체 가져오기
+    def lastBuild = Jenkins.instance.getItemByFullName(aPipelineName).lastBuild
+
+    // 빌드 정보 추출
+    def buildNumber = lastBuild.number
+    def buildResult = lastBuild.result
+    def duration = lastBuild.durationString
+    
+    // 시작 시간을 Calendar 객체에서 SimpleDateFormat을 사용하여 포맷팅
+    def fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+    def buildTime = fmt.format(lastBuild.timestamp.time)
+
+    return [buildNumber, buildResult, duration, buildTime]
+}
+
+pipeline {
+    agent any
+    environment {
+        REDMINE_URL = 'http://192.168.56.18:3000'
+        REDMINE_API_KEY = credentials('redmine-api-key')
+        SONAR_HOST_URL = "http://192.168.56.18:9001" // SonarQube 서버 URL
+        folderName = "gradle-basic"
+    }
+    stages {
+
+        stage('Build_Report') {
+            steps {
+                script {
+                    // getBuildInfo 함수를 호출하여 정보를 가져옵니다.
+                    def (buildNumber, buildResult, duration, buildTime) = getBuildInfo()
+
+                    def reportContent = 
+"""
+### 빌드 번호: ${buildNumber}
+### 빌드 결과: ${buildResult}
+### 소요 시간: ${duration}
+"""
+
+                    def replace_reportContent = JsonOutput.toJson(reportContent.replaceAll(",", "\n"))
+                    
+                    def responseContent = httpRequest(
+                        httpMode: 'POST',
+                        url: "${env.REDMINE_URL}/issues.json?key=${env.REDMINE_API_KEY}",
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: """
+                        {
+                            "issue": {
+                                "project_id": 4,
+                                "tracker_id": 1,
+                                "status_id": 2,
+                                "priority_id": 4,
+                                "subject": "[${buildTime}] Build: ${buildResult}",
+                                "description": ${replace_reportContent}
+                            }
+                        }
+                        """
+                    ).content
+
+                    // 정보 출력
+                    echo "A 파이프라인 정보 (빌드 #${buildNumber}):"
+                    echo "- 실행 결과: ${buildResult}"
+                    echo "- 소요 시간: ${duration}"
+                    echo "- 최종 결과: ${buildResult}" 
+                    echo "- 시작 시간: ${buildTime}"
+                }
+            }
+        }
+
+        stage('Sonarqube_Report') {
+            steps {
+                script {
+                    def sonarStatus = httpRequest(
+                        url: "${env.SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=gradle-basic",
+                        httpMode: 'GET',
+                        validResponseCodes: '200'
+                    )
+                    def sonarStatus_json = readJSON text: sonarStatus.content
+                    def projectStatus = sonarStatus_json.projectStatus.status == "OK" ? "Passed" : "Failed"
+                    echo "projectStatus: ${projectStatus}"
+                    
+                    
+                    def sonarLastAnalysisDate = httpRequest(
+                        authentication: 'sonarqube_user_account',
+                        url: "${env.SONAR_HOST_URL}/api/projects/search?projects=gradle-basic&facets=lastAnalysisDate",
+                        httpMode: 'GET', 
+                        validResponseCodes: '200'
+                    )
+                    def sonarLastAnalysisDate_json = readJSON text: sonarLastAnalysisDate.content
+                    def lastAnalysisDate = sonarLastAnalysisDate_json.components.lastAnalysisDate
+                    echo "lastAnalysisDate: ${lastAnalysisDate}"
+                    
+                    def sonarResult = httpRequest(
+                        url: "${env.SONAR_HOST_URL}/api/measures/component?component=gradle-basic&metricKeys=code_smells&additionalFields=period",
+                        httpMode: 'GET', 
+                        validResponseCodes: '200'
+                    )
+                    def sonarResult_json = readJSON text: sonarResult.content
+                    def codeSmells = sonarResult_json.component.measures.find { it.metric == 'code_smells' }.value
+                    echo "Code Smells: ${codeSmells}"
+
+                    def responseContent = httpRequest(
+                        httpMode: 'POST',
+                        url: "${env.REDMINE_URL}/issues.json?key=${env.REDMINE_API_KEY}",
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: """
+                        {
+                            "issue": {
+                                "project_id": 4,
+                                "tracker_id": 3,
+                                "status_id": 2,
+                                "priority_id": 4,
+                                "subject": "${lastAnalysisDate} Qualitygate: ${projectStatus}",
+                                "description": ${codeSmells}
+                            }
+                        }
+                        """
+                    ).content
+                }
+            }
+        }
+    }
+}

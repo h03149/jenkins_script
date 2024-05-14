@@ -1,0 +1,89 @@
+pipeline {
+    agent any
+
+    environment {
+        GITHUB_REPO_URL = 'https://github.com/h03149/sonar-scanning-examples.git'
+        GITEA_REPO_URL = 'http://gitea.13.209.205.100.nip.io/k933167h/github_mirror.git'
+        GITEA_REPO_DIR = 'github_mirror'
+        GITHUB_BRANCH = 'master' // GitHub 리포지토리의 브랜치 이름
+        BRANCH = 'main' // Gitea 리포지토리의 사용할 브랜치 이름
+        GIT_USER_NAME = 'jinho.han' // Git 사용자 이름
+        GIT_USER_EMAIL = 'jinho.han@kt.com' // Git 사용자 이메일
+    }
+
+    stages {
+        stage('Clone or Initialize Gitea Repo') {
+            steps {
+                script {
+                    // Gitea 리포지토리를 클론하거나 초기화
+                    withCredentials([string(credentialsId: 'gitea_token', variable: 'GITEA_TOKEN')]) {
+                        sh """
+                        if git ls-remote ${GITEA_REPO_URL} -q; then
+                            git clone http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')} ${GITEA_REPO_DIR}
+                        else
+                            mkdir ${GITEA_REPO_DIR}
+                            cd ${GITEA_REPO_DIR}
+                            git init
+                            git remote add origin http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')}
+                        fi
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Fetch from GitHub') {
+            steps {
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        // GitHub 리포지토리에서 변경 사항을 가져오기
+                        sh """
+                        git remote add github ${GITHUB_REPO_URL} || true
+                        git fetch github
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Merge Changes') {
+            steps {
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        // Git 사용자 이름과 이메일 설정
+                        sh """
+                        git config user.name "${GIT_USER_NAME}"
+                        git config user.email "${GIT_USER_EMAIL}"
+                        """
+
+                        // GitHub 리포지토리의 변경 사항을 병합
+                        sh """
+                        git checkout -B ${BRANCH}
+                        git merge github/${GITHUB_BRANCH} --allow-unrelated-histories -m "Merged changes from GitHub"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Push to Gitea') {
+            steps {
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        withCredentials([string(credentialsId: 'gitea_token', variable: 'GITEA_TOKEN')]) {
+                            sh """
+                            git push http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')} ${BRANCH}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        cleanup {
+            deleteDir() // 작업 완료 후 임시 파일 삭제
+        }
+    }
+}

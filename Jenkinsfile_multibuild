@@ -1,0 +1,74 @@
+pipeline {
+    agent any
+
+    parameters {
+        // 경로 및 빌드 도구 목록을 저장한 파일 경로를 입력받는 파라미터
+        string(name: 'filePath', defaultValue: 'paths.txt', description: 'File containing paths and build tools')
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    // 파일에서 경로 및 빌드 도구 목록을 읽어옵니다.
+                    def fileContent = readFile(params.filePath).trim()
+                    pathsAndTools = fileContent.split('\n').collect { line ->
+                        def parts = line.split(',')
+                        return [path: parts[0].trim(), tool: parts[1].trim()]
+                    }
+                }
+            }
+        }
+
+        stage('Process Paths') {
+            matrix {
+                axes {
+                    axis {
+                        name 'PATH'
+                        values pathsAndTools.collect { it.path }
+                    }
+                    axis {
+                        name 'TOOL'
+                        values pathsAndTools.collect { it.tool }.unique()
+                    }
+                }
+                stages {
+                    stage('Process Path') {
+                        when {
+                            expression {
+                                def currentPathAndTool = pathsAndTools.find { it.path == PATH }
+                                return currentPathAndTool?.tool == TOOL
+                            }
+                        }
+                        steps {
+                            script {
+                                def currentPath = PATH
+                                def currentTool = TOOL
+                                echo "Processing path: ${currentPath} with tool: ${currentTool}"
+                                
+                                // 각 경로에 대해 필요한 작업을 수행합니다.
+                                if (currentTool == 'gradle') {
+                                    sh "echo 'Running Gradle build for ${currentPath}'"
+                                    // 실제 Gradle 빌드 명령어를 여기서 실행
+                                    // sh "cd ${currentPath} && ./gradlew build"
+                                } else if (currentTool == 'maven') {
+                                    sh "echo 'Running Maven build for ${currentPath}'"
+                                    // 실제 Maven 빌드 명령어를 여기서 실행
+                                    // sh "cd ${currentPath} && mvn clean install"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* data file ex)
+/path1,gradle
+/path2,maven
+/path3,gradle
+/path4,maven
+/path5,gradle
+*/

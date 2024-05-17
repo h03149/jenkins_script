@@ -1,7 +1,8 @@
 pipeline {
     agent any
     environment {
-        folderName = "gradle-basic"
+        MVN_HOME = tool 'jenkins_Maven_3_9_6'
+        folderName = "maven-basic"
     }
 
     stages {
@@ -14,23 +15,25 @@ pipeline {
 
         stage('Build') {
             steps {
+                /*
                 // Gradle 프로젝트 스캔
                 dir("sonar-scanner-gradle/${folderName}") {
                     sh './gradlew clean build'
                 }
+                */
 
-                /*
+                
                 // Maven 프로젝트 스캔
-                dir('sonar-scanner-maven/maven-basic') {
+                dir("sonar-scanner-maven/${folderName}") {
                     sh '${MVN_HOME}/bin/mvn clean verify'
                 }
-                */
             }
         }
         
         stage('Quality Gate') {
             steps {
                 script {
+                    /*
                     dir("sonar-scanner-gradle/${folderName}") {
                         withSonarQubeEnv('sonarqube') {
                             sh "./gradlew \
@@ -39,8 +42,8 @@ pipeline {
                                 -Dsonar.plugins.downloadOnlyRequired=true sonar"
                         }
                     }
-
-                    /*
+                    */
+                    
                     dir("sonar-scanner-maven/${folderName}") {
                         withSonarQubeEnv('SonarQube Server') {
                             sh "${MVN_HOME}/bin/mvn sonar:sonar \
@@ -49,7 +52,6 @@ pipeline {
                             -Dsonar.plugins.downloadOnlyRequired=true"
                         }
                     }
-                    */
                 }
             }
         }

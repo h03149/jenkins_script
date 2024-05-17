@@ -1,0 +1,65 @@
+pipeline {
+    agent any
+    environment {
+        folderName = "gradle-basic"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git 'https://github.com/h03149/sonar-scanning-examples.git'
+                echo 'git checkout'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                // Gradle 프로젝트 스캔
+                dir("sonar-scanner-gradle/${folderName}") {
+                    sh './gradlew clean build'
+                }
+
+                /*
+                // Maven 프로젝트 스캔
+                dir('sonar-scanner-maven/maven-basic') {
+                    sh '${MVN_HOME}/bin/mvn clean verify'
+                }
+                */
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    dir("sonar-scanner-gradle/${folderName}") {
+                        withSonarQubeEnv('sonarqube') {
+                            sh "./gradlew \
+                                -Dsonar.projectKey=${folderName} \
+                                -Dsonar.projectName='${folderName}' \
+                                -Dsonar.plugins.downloadOnlyRequired=true sonar"
+                        }
+                    }
+
+                    /*
+                    dir("sonar-scanner-maven/${folderName}") {
+                        withSonarQubeEnv('SonarQube Server') {
+                            sh "${MVN_HOME}/bin/mvn sonar:sonar \
+                            -Dsonar.projectKey=${folderName} \
+                            -Dsonar.projectName='${folderName}' \
+                            -Dsonar.plugins.downloadOnlyRequired=true"
+                        }
+                    }
+                    */
+                }
+            }
+        }
+    }
+    
+    post { 
+        always { 
+            echo 'I will always say Hello again!'
+            // build job: 'report_redmine', wait: false
+            // 예시 build job: 'B-파이프라인-이름', parameters: [string(name: 'Param1', value: 'Value1')]
+        }
+    }
+}

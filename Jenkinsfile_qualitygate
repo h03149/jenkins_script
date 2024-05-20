@@ -1,65 +1,119 @@
 pipeline {
     agent any
     environment {
-        folderName = "gradle-basic"
+        folderName = "jinho_test_pi_game-dev"
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        sonarqubeUrl = "http://sonarqube.13.209.205.100.nip.io/dashboard?id=jinho_test_pi_game-dev"
     }
 
     stages {
-        stage('Checkout') {
+        stage('Fetch Artifacts') {
             steps {
-                git 'https://github.com/h03149/sonar-scanning-examples.git'
-                echo 'git checkout'
+                // 파이프라인 A에서 빌드된 아티팩트 다운로드
+                step([$class: 'CopyArtifact', projectName: 'jinho_test(build)', filter: 'build/libs/*.jar, build/classes/**', target: 'build', flatten: true])
             }
         }
 
-        stage('Build') {
-            steps {
-                // Gradle 프로젝트 스캔
-                dir("sonar-scanner-gradle/${folderName}") {
-                    sh './gradlew clean build'
-                }
-
-                /*
-                // Maven 프로젝트 스캔
-                dir('sonar-scanner-maven/maven-basic') {
-                    sh '${MVN_HOME}/bin/mvn clean verify'
-                }
-                */
-            }
-        }
-        
-        stage('Quality Gate') {
+        stage('SonarQube Analysis') {
             steps {
                 script {
-                    dir("sonar-scanner-gradle/${folderName}") {
-                        withSonarQubeEnv('sonarqube') {
-                            sh "./gradlew \
-                                -Dsonar.projectKey=${folderName} \
-                                -Dsonar.projectName='${folderName}' \
-                                -Dsonar.plugins.downloadOnlyRequired=true sonar"
-                        }
+                    withSonarQubeEnv('sonarqube') {
+                        // SonarQube 스캔 실행
+                        sh """
+                            chmod +x ./gradlew
+                            ./gradlew -Dsonar.projectKey=${folderName} -Dsonar.projectName="${folderName}" -Dsonar.plugins.downloadOnlyRequired=true -Dsonar.java.binaries=build sonar
+                        """
                     }
-
-                    /*
-                    dir("sonar-scanner-maven/${folderName}") {
-                        withSonarQubeEnv('SonarQube Server') {
-                            sh "${MVN_HOME}/bin/mvn sonar:sonar \
-                            -Dsonar.projectKey=${folderName} \
-                            -Dsonar.projectName='${folderName}' \
-                            -Dsonar.plugins.downloadOnlyRequired=true"
-                        }
-                    }
-                    */
                 }
             }
         }
     }
     
     post { 
-        always { 
-            echo 'I will always say Hello again!'
-            // build job: 'report_redmine', wait: false
-            // 예시 build job: 'B-파이프라인-이름', parameters: [string(name: 'Param1', value: 'Value1')]
+        always {
+            script {
+                // SonarQube Quality Gate 결과 가져오기
+
+                def maxRetries = 10
+                def retryInterval = 10 // seconds
+
+                def getQualityGateDate(folderName) {
+                    def response = httpRequest(
+                        url: "http://sonarqube.13.209.205.100.nip.io/api/projects/search?projects=${folderName}",
+                        acceptType: 'APPLICATION_JSON',
+                        httpMode: 'GET'
+                    )
+                    def json_t = readJSON text: response.content
+                    return json_t.components.lastAnalysisDate
+                }
+
+                def qualityGateTime = getQualityGateDate(folderName)
+
+                for (int i = 0; i < maxRetries; i++) {
+                    def newQualityGateTime = getQualityGateDate(folderName)
+                    if (newQualityGateTime && newQualityGateTime != qualityGateTime) {
+                        qualityGateTime = newQualityGateTime
+                        break
+                    }
+                    sleep(retryInterval * 1000)
+                }
+                
+                def qualityGateResult = httpRequest(
+                    url: "http://sonarqube.13.209.205.100.nip.io/api/qualitygates/project_status?projectKey=${folderName}",
+                    acceptType: 'APPLICATION_JSON'
+                )
+                
+                def json = readJSON text: qualityGateResult.content
+                def qualityGateStatus = json.projectStatus.status
+                def conditions = json.projectStatus.conditions
+                
+                def overallConditions = conditions.findAll { !it.metricKey.contains("new") }
+                def newConditions = conditions.findAll { it.metricKey.contains("new") }
+
+                def formatCondition = { condition ->
+                    def actualValue = condition.actualValue ?: 'N/A'
+                    def errorThreshold = condition.errorThreshold ?: 'N/A'
+                    def unit = condition.comparator == 'LT' ? '%' : ''
+                    return "- Metric: ${condition.metricKey} | Status: ${condition.status} | Actual Value: ${actualValue}/${errorThreshold}${unit}"
+                }
+
+                def redmineIssueTitle = "QualityGate: ${qualityGateStatus} _ QualityGate Time: ${qualityGateTime}"
+                def redmineIssueDescription = """
+                - QualityGate 결과: ${qualityGateStatus}
+
+                - Overall:
+                ${overallConditions.collect { formatCondition(it) }.join('\n')}
+
+                ---------------------------------
+
+                - New:
+                ${newConditions.collect { formatCondition(it) }.join('\n')}
+                
+                ---------------------------------
+                
+                - 링크: ${sonarqubeUrl}
+                """
+                
+                def redmineIssueData = [
+                    issue: [
+                        project_id: 1,
+                        tracker_id: 6,
+                        subject: redmineIssueTitle,
+                        description: redmineIssueDescription
+                    ]
+                ]
+                
+                def response = httpRequest(
+                    httpMode: 'POST',
+                    url: 'http://redmine.13.209.205.100.nip.io/issues.json',
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                )
+
+                echo "Redmine Issue Created: ${response}"
+            }
         }
     }
 }

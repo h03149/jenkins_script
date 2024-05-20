@@ -1,67 +1,76 @@
 pipeline {
     agent any
-    environment {
-        MVN_HOME = tool 'jenkins_Maven_3_9_6'
-        folderName = "maven-basic"
-    }
 
+    environment {
+        //MVN_HOME = tool 'jenkins_Maven_3_9_6'
+        folderName = "jinho_test_pi_game-dev"
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        jenkinsUrl = "http://jenkins.13.209.205.100.nip.io/job/jinho_test(build)"
+    }
+    
     stages {
         stage('Checkout') {
             steps {
-                git 'https://github.com/h03149/sonar-scanning-examples.git'
+                git "http://gitea.13.209.205.100.nip.io/k933167h/${folderName}.git"
                 echo 'git checkout'
             }
         }
 
         stage('Build') {
             steps {
-                /*
-                // Gradle 프로젝트 스캔
-                dir("sonar-scanner-gradle/${folderName}") {
-                    sh './gradlew clean build'
-                }
-                */
-
-                
-                // Maven 프로젝트 스캔
-                dir("sonar-scanner-maven/${folderName}") {
-                    sh '${MVN_HOME}/bin/mvn clean verify'
-                }
-            }
-        }
-        
-        stage('Quality Gate') {
-            steps {
-                script {
-                    /*
-                    dir("sonar-scanner-gradle/${folderName}") {
-                        withSonarQubeEnv('sonarqube') {
-                            sh "./gradlew \
-                                -Dsonar.projectKey=${folderName} \
-                                -Dsonar.projectName='${folderName}' \
-                                -Dsonar.plugins.downloadOnlyRequired=true sonar"
-                        }
-                    }
-                    */
-                    
-                    dir("sonar-scanner-maven/${folderName}") {
-                        withSonarQubeEnv('SonarQube Server') {
-                            sh "${MVN_HOME}/bin/mvn sonar:sonar \
-                            -Dsonar.projectKey=${folderName} \
-                            -Dsonar.projectName='${folderName}' \
-                            -Dsonar.plugins.downloadOnlyRequired=true"
-                        }
-                    }
-                }
+                sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
+                sh './gradlew clean build'
             }
         }
     }
     
     post { 
-        always { 
-            echo 'I will always say Hello again!'
-            // build job: 'report_redmine', wait: false
-            // 예시 build job: 'B-파이프라인-이름', parameters: [string(name: 'Param1', value: 'Value1')]
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def buildStartTime = new Date(currentBuild.startTimeInMillis)
+                def buildDuration = currentBuild.durationString.replace(' and counting', '')
+                def buildEndTime = new Date()
+                
+                def redmineIssueTitle = "Build Check: [${buildResult}] _ Build Time: ${buildStartTime.format('yyyy-MM-dd HH:mm:ss')}"
+                def redmineIssueDescription = """
+                - 빌드 결과: ${buildResult}
+                - 빌드 시작 시간: ${buildStartTime.format('yyyy-MM-dd HH:mm:ss')}
+                - 빌드 소요 시간: ${buildDuration}
+                - 빌드 번호: ${currentBuild.number}
+                - 링크: ${jenkinsUrl}/${currentBuild.number}/
+                """
+    
+                def redmineIssueData = [
+                    issue: [
+                        project_id: 1,
+                        tracker_id: 5,
+                        subject: redmineIssueTitle,
+                        description: redmineIssueDescription
+                    ]
+                ]
+                
+                def response = httpRequest(
+                    httpMode: 'POST',
+                    url: 'http://redmine.13.209.205.100.nip.io/issues.json',
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                )
+                
+                echo "Redmine Issue Created: ${response}"
+                
+                
+                // 빌드 결과에 따라 후속 파이프라인 실행
+                if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
+                    echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
+                    build job: 'jinho_test(qualitygate)', wait: false
+                } else if (currentBuild.result == 'FAILURE') {
+                    echo 'Build failed. report redmine.'
+                }
+            }
+            archiveArtifacts artifacts: 'build/libs/*.jar, build/classes/**', fingerprint: true
         }
     }
 }

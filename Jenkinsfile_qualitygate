@@ -4,6 +4,7 @@ pipeline {
         folderName = "jinho_test_pi_game-dev"
         redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
         sonarqubeUrl = "http://sonarqube.13.209.205.100.nip.io/dashboard?id=jinho_test_pi_game-dev"
+        sonarApiToken = credentials('sonarqube_admin_token')
     }
 
     stages {
@@ -27,67 +28,78 @@ pipeline {
                 }
             }
         }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    timeout(time: 5, unit: 'MINUTES') {
+                        def qg = waitForQualityGate()
+                        echo "Quality Gate status: ${qg.status}"
+                        if (qg.status != 'OK') {
+                            error "Quality Gate failed: ${qg.status}"
+                        }
+                    }
+                }
+            }
+        }
     }
     
     post { 
         always {
             script {
-                // SonarQube Quality Gate 결과 가져오기
-
-                def maxRetries = 10
-                def retryInterval = 10 // seconds
-
-                def getQualityGateDate(folderName) {
-                    def response = httpRequest(
-                        url: "http://sonarqube.13.209.205.100.nip.io/api/projects/search?projects=${folderName}",
-                        acceptType: 'APPLICATION_JSON',
-                        httpMode: 'GET'
-                    )
-                    def json_t = readJSON text: response.content
-                    return json_t.components.lastAnalysisDate
-                }
-
-                def qualityGateTime = getQualityGateDate(folderName)
-
-                for (int i = 0; i < maxRetries; i++) {
-                    def newQualityGateTime = getQualityGateDate(folderName)
-                    if (newQualityGateTime && newQualityGateTime != qualityGateTime) {
-                        qualityGateTime = newQualityGateTime
-                        break
-                    }
-                    sleep(retryInterval * 1000)
-                }
+                // SonarQube 프로젝트 검색
+                def qualityGateProject = httpRequest(
+                    httpMode: 'GET',
+                    url: "http://sonarqube.13.209.205.100.nip.io/api/projects/search?projects=${folderName}",
+                    acceptType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
+                )
+                def json_t = readJSON text: qualityGateProject.content
+                def qualityGateTime = json_t.components[0].lastAnalysisDate
                 
+                // UTC 시간 -> UTC+9로 변환
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ")
+                def parsedDate = dateFormat.parse(qualityGateTime)
+                def calendar = java.util.Calendar.getInstance()
+                calendar.setTime(parsedDate)
+                def qualityGateTimeKST = dateFormat.format(calendar.getTime())
+                
+                // SonarQube Quality Gate 상태 조회
                 def qualityGateResult = httpRequest(
+                    httpMode: 'GET',
                     url: "http://sonarqube.13.209.205.100.nip.io/api/qualitygates/project_status?projectKey=${folderName}",
-                    acceptType: 'APPLICATION_JSON'
+                    acceptType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
                 )
                 
                 def json = readJSON text: qualityGateResult.content
                 def qualityGateStatus = json.projectStatus.status
                 def conditions = json.projectStatus.conditions
                 
+                // overall / new 분리
                 def overallConditions = conditions.findAll { !it.metricKey.contains("new") }
                 def newConditions = conditions.findAll { it.metricKey.contains("new") }
 
+                // 보고 방식 Metric : [] | Status : [] | Actual Value : [결과/조건]/[단위(%인 경우에만)]
                 def formatCondition = { condition ->
                     def actualValue = condition.actualValue ?: 'N/A'
                     def errorThreshold = condition.errorThreshold ?: 'N/A'
                     def unit = condition.comparator == 'LT' ? '%' : ''
                     return "- Metric: ${condition.metricKey} | Status: ${condition.status} | Actual Value: ${actualValue}/${errorThreshold}${unit}"
                 }
-
-                def redmineIssueTitle = "QualityGate: ${qualityGateStatus} _ QualityGate Time: ${qualityGateTime}"
+                
+                // Redmine report
+                def redmineIssueTitle = "QualityGate: ${qualityGateStatus} _ QualityGate Time: ${qualityGateTimeKST}"
                 def redmineIssueDescription = """
                 - QualityGate 결과: ${qualityGateStatus}
 
-                - Overall:
-                ${overallConditions.collect { formatCondition(it) }.join('\n')}
+                [Overall]
+                ${overallConditions.collect { formatCondition(it) }.join('\n                ')}
 
                 ---------------------------------
 
-                - New:
-                ${newConditions.collect { formatCondition(it) }.join('\n')}
+                [New]
+                ${newConditions.collect { formatCondition(it) }.join('\n                ')}
                 
                 ---------------------------------
                 

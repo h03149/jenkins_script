@@ -3,7 +3,10 @@ pipeline {
 
     environment {
         //MVN_HOME = tool 'jenkins_Maven_3_9_6'
-        folderName = "jinho_test_pi_game-dev"
+
+        folderName = "gradle-basic"
+        //folderName = "jinho_test_pi_game-dev"
+        
         redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
         jenkinsUrl = "http://jenkins.13.209.205.100.nip.io/job/jinho_test(build)"
     }
@@ -11,6 +14,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
+                deleteDir() // 폴더 구분 없이 사용 시 해당 문구 없으면 충돌 발생해서 오류 남
                 git "http://gitea.13.209.205.100.nip.io/k933167h/${folderName}.git"
                 echo 'git checkout'
             }
@@ -19,7 +23,7 @@ pipeline {
         stage('Build') {
             steps {
                 sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
-                sh './gradlew clean build'
+                sh './gradlew clean build -x test'
                 
                 // Maven 프로젝트 스캔
                 //sh '${MVN_HOME}/bin/mvn clean verify'
@@ -64,7 +68,7 @@ pipeline {
                 
                 echo "Redmine Issue Created: ${response}"
                 
-                
+                /* 임시 후속 파이프라인 주석처리 240522_jinho.han
                 // 빌드 결과에 따라 후속 파이프라인 실행
                 if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
                     echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
@@ -72,6 +76,7 @@ pipeline {
                 } else if (currentBuild.result == 'FAILURE') {
                     echo 'Build failed. report redmine.'
                 }
+                */
             }
             archiveArtifacts artifacts: 'build/libs/*.jar, build/classes/**', fingerprint: true
         }

@@ -20,6 +20,9 @@ pipeline {
             steps {
                 sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
                 sh './gradlew clean build'
+                
+                // Maven 프로젝트 스캔
+                //sh '${MVN_HOME}/bin/mvn clean verify'
             }
         }
     }

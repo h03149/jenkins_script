@@ -72,7 +72,7 @@ pipeline {
                 // 빌드 결과에 따라 후속 파이프라인 실행
                 if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
                     echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
-                    build job: 'jinho_test(JUnit)', wait: false
+                    build job: 'jinho_test(test)', wait: false
                 } else if (currentBuild.result == 'FAILURE') {
                     echo 'Build failed. report redmine.'
                 }

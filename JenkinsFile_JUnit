@@ -1,0 +1,70 @@
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/jinho_test(build)'
+        }
+    }
+    
+    environment {
+        // Redmine API 설정
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+
+    stages {
+        stage('Run Tests') {
+            steps {
+                script {
+                    sh """
+                        chmod +x ./gradlew
+                        ./gradlew test jacocoTestReport
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // JUnit XML 리포트 경로
+                def testReportFile = 'build/test-results/test/TEST-com.acme.AppTest.xml'
+                
+                // XML 파일 파싱
+                def testResults = readFile(testReportFile)
+                def testsuite = new XmlSlurper().parseText(testResults)
+                
+                testsuite.testcase.each { testcase ->
+                    def testName = testcase.@name
+                    def testClass = testcase.@classname
+                    def testStatus = testcase.'*'.isEmpty() ? 'SUCCESS' : testcase.'*'.name()
+                    def issueSubject = "Test Result: ${testClass}.${testName} - ${testStatus}"
+                    def issueDescription = "Test case `${testClass}.${testName}` resulted in ${testStatus}."
+
+                    // Redmine 이슈 생성 요청
+                    def redmineIssueData = [
+                        issue: [
+                            project_id: 1,
+                            tracker_id: 4,
+                            subject: issueSubject,
+                            description: issueDescription
+                        ]
+                    ]
+
+                    def response = httpRequest(
+                        httpMode: 'POST',
+                        url: 'http://redmine.13.209.205.100.nip.io/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                    )
+                    
+                    echo "Redmine Issue Created: ${response}"
+                }
+
+                build job: 'jinho_test(qualitygate)', wait: false
+            }
+        }
+    }
+}

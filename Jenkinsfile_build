@@ -14,7 +14,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                deleteDir() // 폴더 구분 없이 사용 시 해당 문구 없으면 충돌 발생해서 오류 남
+                cleanWs()
                 git "http://gitea.13.209.205.100.nip.io/k933167h/${folderName}.git"
                 echo 'git checkout'
             }
@@ -68,17 +68,15 @@ pipeline {
                 
                 echo "Redmine Issue Created: ${response}"
                 
-                /* 임시 후속 파이프라인 주석처리 240522_jinho.han
+                
                 // 빌드 결과에 따라 후속 파이프라인 실행
                 if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
                     echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
-                    build job: 'jinho_test(qualitygate)', wait: false
+                    build job: 'jinho_test(JUnit)', wait: false
                 } else if (currentBuild.result == 'FAILURE') {
                     echo 'Build failed. report redmine.'
                 }
-                */
             }
-            archiveArtifacts artifacts: 'build/libs/*.jar, build/classes/**', fingerprint: true
         }
     }
 }

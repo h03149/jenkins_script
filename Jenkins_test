@@ -1,0 +1,185 @@
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/jinho_test'
+        }
+    }
+
+    environment {
+        // Redmine API 설정
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+
+    stages {
+        stage('Run Tests') {
+            steps {
+                script {
+                    sh """
+                        chmod +x ./gradlew
+                        ./gradlew test jacocoTestReport
+                    """
+                    
+                    junit 'build/test-results/test/**/*.xml'
+                }
+            }
+        }
+        
+        stage('JUnit Report') {
+            steps {
+                script {
+                    // 테스트 결과 파일들을 찾기
+                    def xmlFiles = findFiles(glob: 'build/test-results/test/**/*.xml')
+                    echo "xmlFiles: ${xmlFiles}"
+
+                    // 디버깅: 찾은 파일 리스트 출력
+                    if (xmlFiles.length == 0) {
+                        error "No XML files found!"
+                    } else {
+                        echo "Found XML files: ${xmlFiles.collect { it.path }.join(', ')}"
+                    }
+
+                    // 각 XML 파일을 순회하며 테스트 케이스와 실패 메시지 추출
+                    xmlFiles.each { xmlFile ->
+                        echo "Processing file: ${xmlFile.path}"
+                        def xmlContent = readFile(xmlFile.path)
+                        echo "XML Content:\n${xmlContent}"  // XML 파일 내용 출력
+
+                        // 전체 테스트 스위트 결과 추출
+                        def testsuitesPattern = /<testsuites[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+                        def testsuitePattern = /<testsuite[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" name="([^"]+)" skipped="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+
+                        def testsuitesMatcher = xmlContent =~ testsuitesPattern
+                        def testsuiteMatcher = xmlContent =~ testsuitePattern
+
+                        if (testsuitesMatcher) {
+                            testsuitesMatcher.each { match ->
+                                echo """
+                                Overall Test Suites:
+                                Disabled: ${match[1]}
+                                Errors: ${match[2]}
+                                Failures: ${match[3]}
+                                Total Tests: ${match[4]}
+                                Total Time: ${match[5]}
+                                """
+                            }
+                        }
+
+                        if (testsuiteMatcher) {
+                            testsuiteMatcher.each { match ->
+                                echo """
+                                Test Suite:
+                                Name: ${match[4]}
+                                Disabled: ${match[1]}
+                                Errors: ${match[2]}
+                                Failures: ${match[3]}
+                                Skipped: ${match[5]}
+                                Total Tests: ${match[6]}
+                                Total Time: ${match[7]}
+                                """
+
+                                // 각 테스트 케이스 정보 추출
+                                def testCasePattern = /<testcase name="([^"]+)" classname="([^"]+)" time="([^"]+)"(?:>(.*?)<\/testcase>|\/>)/
+                                def failurePattern = /<failure message="([^"]+)" type="([^"]+)">(.*?)<\/failure>/
+                                def errorPattern = /<error message="([^"]+)" type="([^"]+)">(.*?)<\/error>/
+                                def skippedPattern = /<skipped type="([^"]+)" message="([^"]+)"/>/
+
+                                def matcher = xmlContent =~ testCasePattern
+
+                                if (matcher) {
+                                    matcher.each { match ->
+                                        def testName = match[1]
+                                        def className = match[2]
+                                        def time = match[3]
+                                        def testCaseContent = match[4] ?: ''
+                                        def failureMessage = ''
+                                        def errorMessage = ''
+                                        def skippedMessage = ''
+                                        def issueStatusId = 1
+                                        def statusText = 'SUCCESS'
+
+                                        // 실패 메시지 추출
+                                        def failureMatcher = testCaseContent =~ failurePattern
+                                        if (failureMatcher) {
+                                            failureMatcher.each { fmatch ->
+                                                failureMessage = "Failure: ${fmatch[1]}, Type: ${fmatch[2]}, Message: ${fmatch[3]}"
+                                                issueStatusId = 2
+                                                statusText = 'FAILURE'
+                                            }
+                                        }
+
+                                        // 오류 메시지 추출
+                                        def errorMatcher = testCaseContent =~ errorPattern
+                                        if (errorMatcher) {
+                                            errorMatcher.each { ematch ->
+                                                errorMessage = "Error: ${ematch[1]}, Type: ${ematch[2]}, Message: ${ematch[3]}"
+                                                issueStatusId = 3
+                                                statusText = 'ERROR'
+                                            }
+                                        }
+
+                                        // 스킵 메시지 확인
+                                        def skippedMatcher = testCaseContent =~ skippedPattern
+                                        if (skippedMatcher) {
+                                            skippedMatcher.each { smatch ->
+                                                skippedMessage = "Skipped: ${smatch[1]}, Message: ${smatch[2]}"
+                                                issueStatusId = 4
+                                                statusText = 'SKIPPED'
+                                            }
+                                        }
+
+                                        def testCaseDetails = """
+                                            Test Case:
+                                            Class: ${className}
+                                            Name: ${testName}
+                                            Time: ${time}
+                                            ${failureMessage}
+                                            ${errorMessage}
+                                            ${skippedMessage}
+                                            """
+                                        echo testCaseDetails
+
+                                        // Redmine 이슈 생성
+                                        def issueSubject = "Test Case ${statusText}: ${testName}"
+                                        def issueDescription = """
+                                            Test Case:
+                                            Class: ${className}
+                                            Name: ${testName}
+                                            Time: ${time}
+                                            ${failureMessage}
+                                            ${errorMessage}
+                                            ${skippedMessage}
+                                            """
+
+                                        def redmineIssueData = [
+                                            issue: [
+                                                project_id: 1,
+                                                tracker_id: 4,
+                                                subject: issueSubject,
+                                                description: issueDescription,
+                                                status_id: issueStatusId
+                                            ]
+                                        ]
+
+                                        def response = httpRequest(
+                                            httpMode: 'POST',
+                                            url: 'http://redmine.13.209.205.100.nip.io/issues.json',
+                                            acceptType: 'APPLICATION_JSON',
+                                            contentType: 'APPLICATION_JSON',
+                                            customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                            requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                                        )
+
+                                        echo "Redmine Issue Created: ${response}"
+                                    }
+                                } else {
+                                    echo "No matches found in ${xmlFile.path}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

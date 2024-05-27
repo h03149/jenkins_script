@@ -5,6 +5,11 @@ pipeline {
             customWorkspace '/var/jenkins_home/workspace/jinho_test(build)'
         }
     }
+    parameters {
+        string(name: 'JOB_NUMBER', defaultValue: '', description: 'jinho_test(build) 빌드 번호')
+        string(name: 'JOB_RESULT', defaultValue: '', description: 'jinho_test(build) 빌드 결과')
+        string(name: 'JOB_NAME', defaultValue: '', description: 'jinho_test(build)')
+    }
 
     environment {
         // Redmine API 설정
@@ -18,6 +23,7 @@ pipeline {
                     sh """
                         chmod +x ./gradlew
                         ./gradlew test jacocoTestReport
+                        ls -R
                     """
                     
                     junit 'build/test-results/test/**/*.xml'
@@ -25,7 +31,7 @@ pipeline {
             }
         }
         
-        stage('xmlparsed') {
+        stage('JUnit report') {
             steps {
                 script {
                     // 테스트 결과 파일들을 찾기
@@ -140,7 +146,7 @@ pipeline {
                                 issueStatusId = 4
                             }
 
-                            def issueSubject = "Test Case ${statusText}: ${testName}"
+                            def issueSubject = "${params.JOB_NAME}[${params.JOB_NUMBER}]:Test Case ${statusText}: ${testName}"
                             def issueDescription = """
                                 Test Case:
                                 Class: ${className}
@@ -172,6 +178,98 @@ pipeline {
                             )
                         }
                     }
+                }
+            }
+        }
+
+        stage('JaCoCo report') {
+            steps {
+                script {
+                    // 1. 이슈 생성
+                    // 2. zip 파일 생성
+                    // 3. zip 파일 이슈에 첨부
+
+                    // 1. 이슈 생성
+                    // HTML 보고서 내용을 읽어 변수에 저장
+                    def issueDescription = readFile(file: 'build/jacocoHtml/index.html')
+
+                    // 이슈 생성 데이터 구성
+                    def issueSubject = "${params.JOB_NAME}[${params.JOB_NUMBER}]:JaCoCo Coverage Report"
+                    def redmineIssueData = [
+                        issue: [
+                            project_id: 1,
+                            tracker_id: 10,
+                            subject: issueSubject,
+                            description: issueDescription
+                        ]
+                    ]
+
+                    // Redmine 이슈 생성
+                    def createIssueResponse = httpRequest(
+                        httpMode: 'POST',
+                        url: 'http://redmine.13.209.205.100.nip.io/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                    )
+
+                    // 생성된 이슈의 ID 추출
+                    def issueId = readJSON(text: createIssueResponse.content).issue.id
+                    echo "Created Issue ID: ${issueId}"
+
+                    // 2. zip 파일 생성
+                    /* src, jacoco 압축 전달
+                    def zipFilePath = "jacocoHtml_with_sources.zip"
+
+                    def directoriesToZip = [
+                        'build/jacocoHtml/**',
+                        'src/main/java/**',
+                        'src/test/java/**'
+                    ]
+                    zip zipFile: zipFilePath, archive: false, dir: '', glob: directoriesToZip.join(','), overwrite: true
+                    */
+
+                    def zipFilePath = "build/jacocoHtml.zip"
+                    def sourceDir = "build/jacocoHtml"
+
+                    // Create the zip file without changing directory
+                    zip zipFile: zipFilePath, archive: false, dir: sourceDir, overwrite: true
+
+                    // 3. 이슈에 zip 파일 첨부
+
+                    // Upload the file
+                    def uploadResponse = httpRequest(
+                        url: "http://redmine.13.209.205.100.nip.io/uploads.json",
+                        httpMode: 'POST',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                        requestBody: readFile(file: zipFilePath, encoding: 'ISO-8859-1'),
+                        validResponseCodes: '201'
+                    )
+
+                    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                    echo "Upload Token: ${uploadToken}"
+
+                    // Attach the file to the issue
+                    def attachmentData = [
+                        issue: [
+                            uploads: [
+                                [
+                                    token: uploadToken,
+                                    filename: 'jacocoHtml.zip',
+                                    content_type: 'application/zip'
+                                ]
+                            ]
+                        ]
+                    ]
+
+                    httpRequest(
+                        url: "http://redmine.13.209.205.100.nip.io/issues/${issueId}.json",
+                        httpMode: 'PUT',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                    )
                 }
             }
         }

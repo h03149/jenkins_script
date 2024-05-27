@@ -34,6 +34,9 @@ pipeline {
     post { 
         always {
             script {
+                def jobName = env.JOB_NAME
+                echo "jobName: ${jobName}"
+                def buildNumber = currentBuild.number
                 def buildResult = currentBuild.result ?: 'SUCCESS'
                 def buildStartTime = new Date(currentBuild.startTimeInMillis)
                 def buildDuration = currentBuild.durationString.replace(' and counting', '')
@@ -72,7 +75,11 @@ pipeline {
                 // 빌드 결과에 따라 후속 파이프라인 실행
                 if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
                     echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
-                    build job: 'jinho_test(test)', wait: false
+                    build job: 'jinho_test(test)', wait: false, parameters: [
+                        string(name: 'JOB_NUMBER', value: buildNumber.toString()),
+                        string(name: 'JOB_RESULT', value: buildResult),
+                        string(name: 'JOB_NAME', value: jobName)
+                    ]
                 } else if (currentBuild.result == 'FAILURE') {
                     echo 'Build failed. report redmine.'
                 }

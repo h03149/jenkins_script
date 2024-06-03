@@ -1,20 +1,20 @@
 pipeline {
-    agent any
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/jinho_test(build)'
+        }
+    }
+    
     environment {
-        folderName = "jinho_test_pi_game-dev"
+        folderName = "gradle-basic"
+        //folderName = "jinho_test_pi_game-dev"
         redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
-        sonarqubeUrl = "http://sonarqube.13.209.205.100.nip.io/dashboard?id=jinho_test_pi_game-dev"
+        sonarqubeUrl = "http://sonarqube.13.209.205.100.nip.io/dashboard?id=gradle-basic"
         sonarApiToken = credentials('sonarqube_admin_token')
     }
 
     stages {
-        stage('Fetch Artifacts') {
-            steps {
-                // 파이프라인 A에서 빌드된 아티팩트 다운로드
-                step([$class: 'CopyArtifact', projectName: 'jinho_test(build)', filter: 'build/libs/*.jar, build/classes/**', target: 'build', flatten: true])
-            }
-        }
-
         stage('SonarQube Analysis') {
             steps {
                 script {
@@ -89,7 +89,7 @@ pipeline {
                 }
                 
                 // Redmine report
-                def redmineIssueTitle = "QualityGate: ${qualityGateStatus} _ QualityGate Time: ${qualityGateTimeKST}"
+                def redmineIssueTitle = "QualityGate: [${qualityGateStatus}] _ QualityGate Time: ${qualityGateTimeKST}"
                 def redmineIssueDescription = """
                 - QualityGate 결과: ${qualityGateStatus}
 

@@ -1,0 +1,44 @@
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/jinho_test(build)'
+        }
+    }
+
+    tools {
+        'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation' 'Dependency-Check'
+    }
+
+    environment {
+        DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check', type: 'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation'
+        NVD_API_KEY = credentials('NVD_api_key')
+    }
+
+    stages {
+        stage('Dependency Check Analysis') {
+            steps {
+                script {
+                    def reportOutput = "${env.WORKSPACE}/dependency-check-report"
+
+                    sh """
+                        echo "Dependency-Check Home: ${DEPENDENCY_CHECK_HOME}"
+                        ls -l ${DEPENDENCY_CHECK_HOME}/dependency-check/bin
+                        ${DEPENDENCY_CHECK_HOME}/dependency-check/bin/dependency-check.sh \
+                        --project "gradle-basic" \
+                        --scan "${env.WORKSPACE}" \
+                        --format XML \
+                        --out "${reportOutput}" \
+                        --nvdApiKey ${NVD_API_KEY}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+        }
+    }
+}

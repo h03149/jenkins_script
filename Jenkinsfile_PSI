@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Run Pagespeed Insights') {
+            steps {
+                script {
+                    // Pagespeed Insights API URL(&category=pwa PWA인 경우 추가)
+                    def test_url =['https://www.kt.com','https://www.tworld.co.kr','https://www.lguplus.com/']
+
+                    for (int i = 0; i < test_url.size(); ++i) {
+                        def url = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${test_url[i]}&strategy=desktop&category=performance&category=accessibility&category=best-practices&category=seo&locale=ko_KR"
+
+                        // API 호출
+                        def response = httpRequest(
+                            httpMode: 'GET', 
+                            url: url,
+                            acceptType: 'APPLICATION_JSON'
+                        )
+                        // JSON 결과 파싱
+                        def json = readJSON text: response.content
+                        // echo "json: ${json}"
+                        
+                        echo "===성능 문제 진단하기 점수==="
+                        // 성능 점수 출력
+                        def performanceScore = json.lighthouseResult.categories.performance.score * 100
+                        echo "Performance score: ${performanceScore}"
+                        
+                        // 다른 메트릭스도 출력 가능
+                        def accessibilityScore = json.lighthouseResult.categories.accessibility.score * 100
+                        echo "Accessibility score: ${accessibilityScore}"
+                        
+                        def bestPracticesScore = json.lighthouseResult.categories['best-practices'].score * 100
+                        echo "Best Practices score: ${bestPracticesScore}"
+                        
+                        def seoScore = json.lighthouseResult.categories.seo.score * 100
+                        echo "SEO score: ${seoScore}"
+
+                        // 프로그레시브 웹 앱인 경우에만 사용
+                        // def pwaScore = json.lighthouseResult.categories.pwa.score * 100
+                        // echo "PWA score: ${pwaScore}"
+
+                        echo "===코어 웹 바이탈 평가 판단(양호, 개선필요, 불량)==="
+                        def overall_category = json.loadingExperience.overall_category
+                        echo "코어 웹 바이탈 평가: ${overall_category}"
+
+                        echo "===코어 웹 바이탈 평가==="
+                        def lcp_percentile = json.loadingExperience.metrics.LARGEST_CONTENTFUL_PAINT_MS.percentile
+                        echo "Largest Contentful Paint_LCP: ${lcp_percentile}"
+
+                        def inp_percentile = json.loadingExperience.metrics.INTERACTION_TO_NEXT_PAINT.percentile
+                        echo "Interaction to Next Paint_INP: ${inp_percentile}"
+                        
+                        def cls_percentile = json.loadingExperience.metrics.CUMULATIVE_LAYOUT_SHIFT_SCORE.percentile
+                        echo "Cumulative Layout Shift_CLS: ${cls_percentile}"
+                        
+                        def fcp_percentile = json.loadingExperience.metrics.FIRST_CONTENTFUL_PAINT_MS.percentile
+                        echo "First Contentful Paint_FCP: ${fcp_percentile}"
+
+                        def fid_percentile = json.loadingExperience.metrics.FIRST_INPUT_DELAY_MS.percentile
+                        echo "First Input Delay_FID: ${fid_percentile}"
+
+                        echo "===코어 웹 바이탈 평가 판단(양호, 개선필요, 불량)==="
+                        def lcp_category = json.loadingExperience.metrics.LARGEST_CONTENTFUL_PAINT_MS.category
+                        echo "Largest Contentful Paint_LCP: ${lcp_category}"
+
+                        def inp_category = json.loadingExperience.metrics.INTERACTION_TO_NEXT_PAINT.category
+                        echo "Interaction to Next Paint_INP: ${inp_category}"
+
+                        def cls_category = json.loadingExperience.metrics.CUMULATIVE_LAYOUT_SHIFT_SCORE.category
+                        echo "Cumulative Layout Shift_CLS: ${cls_category}"
+
+                        def fcp_category = json.loadingExperience.metrics.FIRST_CONTENTFUL_PAINT_MS.category
+                        echo "First Contentful Paint_FCP: ${fcp_category}"
+
+                        def fid_category = json.loadingExperience.metrics.FIRST_INPUT_DELAY_MS.category
+                        echo "First Input Delay_FID: ${fid_category}"
+
+                        echo "===성능 문제 진단하기 > 성능==="
+                        def fcp_displayValue = json.lighthouseResult.audits['first-contentful-paint'].displayValue
+                        def fcp_score = json.lighthouseResult.audits['first-contentful-paint'].score * 100
+                        echo "fcp displayValue: ${fcp_displayValue} | score: ${fcp_score}"
+
+                        def lcp_displayValue = json.lighthouseResult.audits['largest-contentful-paint'].displayValue
+                        def lcp_score = json.lighthouseResult.audits['largest-contentful-paint'].score * 100
+                        echo "lcp displayValue: ${lcp_displayValue} | score: ${lcp_score}"
+
+                        def tbt_displayValue = json.lighthouseResult.audits['total-blocking-time'].displayValue
+                        def tbt_score = json.lighthouseResult.audits['total-blocking-time'].score * 100
+                        echo "tbt displayValue: ${tbt_displayValue} | score: ${tbt_score}"
+
+                        def cls_displayValue = json.lighthouseResult.audits['cumulative-layout-shift'].displayValue
+                        def cls_score = json.lighthouseResult.audits['cumulative-layout-shift'].score * 100
+                        echo "cls displayValue: ${cls_displayValue} | score: ${cls_score}"
+
+                        def si_displayValue = json.lighthouseResult.audits['speed-index'].displayValue
+                        def si_score = json.lighthouseResult.audits['speed-index'].score * 100
+                        echo "si displayValue: ${si_displayValue} | score: ${si_score}"
+                    }
+                }
+            }
+        }
+    }
+}

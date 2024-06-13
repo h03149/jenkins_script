@@ -1,0 +1,89 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: nodejs
+    image: node:22-alpine
+    securityContext:
+      runAsUser: 0
+    command:
+    - cat
+    tty: true
+"""
+        }
+    }
+
+    environment {
+        GIT_URL = 'https://gitea.toolchain.co.kr/k933167h/gradle-basic.git'
+        GIT_BRANCH = 'master' // 필요한 경우 브랜치를 수정하세요
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                container('nodejs') {
+                    script {
+                        // Install necessary packages
+                        sh 'apk add git chromium'
+                        
+                        // Git 리포지토리 클론
+                        sh "git clone ${env.GIT_URL} ."
+                        
+                        // Git 설정 확인 및 추가
+                        sh 'git config --global --add safe.directory ${WORKSPACE}'
+                        
+                        // 브랜치 체크아웃
+                        sh "git checkout ${env.GIT_BRANCH}"
+                    }
+                }
+            }
+        }
+
+        stage('Prepare Environment') {
+            steps {
+                container('nodejs') {
+                    script {
+                        // Create Lighthouse CI configuration file
+                        writeFile file: 'lighthouserc.js', text: '''module.exports = {
+                          ci: {
+                            collect: {
+                              url: ['https://sonarqube.toolchain.co.kr/'],
+                              settings: {
+                                chromeFlags: ['--no-sandbox']
+                              }
+                            },
+                            upload: {
+                              target: 'lhci',
+                              serverBaseUrl: 'https://lhserver.toolchain.co.kr',
+                              token: 'fdd8e4df-4880-44c2-9532-5bedd5651139',
+                            },
+                          },
+                        };'''
+                        
+                        // 환경 변수 설정
+                        env.LHCI_BUILD_CONTEXT__CURRENT_HASH=sh(returnStdout: true, script: "git rev-parse HEAD").trim()
+
+                        // Install Lighthouse CI CLI
+                        sh 'npm install -g @lhci/cli'
+
+                        // Run Lighthouse CI
+                        sh 'lhci autorun'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            container('nodejs') {
+                // Clean up workspace
+                cleanWs()
+            }
+        }
+    }
+}

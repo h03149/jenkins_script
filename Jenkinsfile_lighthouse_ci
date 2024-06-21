@@ -17,27 +17,70 @@ spec:
         }
     }
 
+    parameters {
+        string(name: 'TARGET_URLS', defaultValue: '', description: '검사할 URL들을 콤마로 구분하여 입력하세요.')
+    }
+
     environment {
-        GIT_URL = 'https://gitea.toolchain.co.kr/k933167h/gradle-basic.git'
+        GIT_URL = 'https://gitea.toolchain.co.kr/k933167h/Lighthouse.git'
         GIT_BRANCH = 'master' // 필요한 경우 브랜치를 수정하세요
     }
 
     stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    // 파라미터 검증
+                    if (!params.TARGET_URLS?.trim()) {
+                        error "TARGET_URLS 파라미터가 설정되지 않았습니다. 파이프라인을 종료합니다."
+                    }
+
+                    def urls = params.TARGET_URLS.split(',').collect { it.trim() }
+                    def invalidUrls = urls.findAll { url ->
+                        !url.startsWith('http://') && !url.startsWith('https://')
+                    }
+
+                    if (invalidUrls) {
+                        error "다음 URL들이 유효하지 않습니다: ${invalidUrls.join(', ')}. 파이프라인을 종료합니다."
+                    }
+                }
+            }
+        }
+
         stage('Clone Repository') {
             steps {
                 container('nodejs') {
                     script {
                         // Install necessary packages
                         sh 'apk add git chromium'
-                        
+
                         // Git 리포지토리 클론
                         sh "git clone ${env.GIT_URL} ."
-                        
+
                         // Git 설정 확인 및 추가
+                        sh "git config --global user.name 'jinho.han'"
+                        sh "git config --global user.email 'jinho.han@kt.com'"
                         sh 'git config --global --add safe.directory ${WORKSPACE}'
-                        
+
                         // 브랜치 체크아웃
                         sh "git checkout ${env.GIT_BRANCH}"
+
+                        // 실행 시간과 요청 URL 리스트를 log.txt에 기록
+                        def currentTime = new Date().format("MM.dd HH:mm")
+                        def urls = params.TARGET_URLS.split(',').collect { it.trim() }
+                        def logEntry = "Time: ${currentTime}\nURLs:\n${urls.join('\n')}\n"
+
+                        // log.txt 파일에 실행 시간과 요청 URL 리스트 작성
+                        sh "echo '${logEntry}' >> log.txt"
+
+                        // Git에 log.txt 커밋
+                        sh 'git add log.txt'
+                        sh "git commit -m '[${currentTime}]: ${urls[0]} 외 ${urls.size() - 1}'"
+                        
+                        // Git 푸시 (Jenkins 크레덴셜 사용)
+                        withCredentials([string(credentialsId: 'gitea_token', variable: 'GITEA_TOKEN')]) {
+                            sh 'git push https://${GITEA_TOKEN}@gitea.toolchain.co.kr/k933167h/Lighthouse.git'
+                        }
                     }
                 }
             }
@@ -47,25 +90,40 @@ spec:
             steps {
                 container('nodejs') {
                     script {
-                        // Create Lighthouse CI configuration file
-                        writeFile file: 'lighthouserc.js', text: '''module.exports = {
-                          ci: {
-                            collect: {
-                              url: ['https://sonarqube.toolchain.co.kr/'],
-                              settings: {
-                                chromeFlags: ['--no-sandbox']
-                              }
-                            },
-                            upload: {
-                              target: 'lhci',
-                              serverBaseUrl: 'https://lhserver.toolchain.co.kr',
-                              token: 'fdd8e4df-4880-44c2-9532-5bedd5651139',
-                            },
-                          },
-                        };'''
-                        
+                        def urls = params.TARGET_URLS.split(',').collect { it.trim() }
+                        def urlList = urls.collect { "'${it}'" }.join(', ')
+
+                        // Lighthouse CI 설정 파일 생성
+                        writeFile file: 'lighthouserc.js', text: """
+module.exports = {
+  ci: {
+    collect: {
+      url: [${urlList}],
+      settings: {
+        chromeFlags: ['--no-sandbox'],
+        preset: 'desktop',
+        emulatedFormFactor: 'desktop',
+        locale: 'ko',
+        screenEmulation: {
+          mobile: false,
+          width: 1920,
+          height: 1080,
+          deviceScaleFactor: 1,
+          disabled: false
+        }
+      }
+    },
+    upload: {
+      target: 'lhci',
+      serverBaseUrl: 'https://lhserver.toolchain.co.kr',
+      token: 'fdd8e4df-4880-44c2-9532-5bedd5651139',
+    },
+  },
+};
+"""
+
                         // 환경 변수 설정
-                        env.LHCI_BUILD_CONTEXT__CURRENT_HASH=sh(returnStdout: true, script: "git rev-parse HEAD").trim()
+                        env.LHCI_BUILD_CONTEXT__CURRENT_HASH = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
 
                         // Install Lighthouse CI CLI
                         sh 'npm install -g @lhci/cli'

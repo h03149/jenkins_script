@@ -13,6 +13,7 @@ pipeline {
     environment {
         DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check', type: 'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation'
         NVD_API_KEY = credentials('NVD_api_key')
+        redmineApiKey = credentials('redmine_api_key')
     }
 
     stages {
@@ -27,10 +28,152 @@ pipeline {
                         ${DEPENDENCY_CHECK_HOME}/dependency-check/bin/dependency-check.sh \
                         --project "gradle-basic" \
                         --scan "${env.WORKSPACE}" \
-                        --format XML \
+                        --format JSON \
+                        --format HTML \
                         --out "${reportOutput}" \
                         --nvdApiKey ${NVD_API_KEY}
                     """
+
+                    // Read the dependency-check report
+                    def jsonReport = readJSON file: "${reportOutput}/dependency-check-report.json"
+                    echo "jsonReport: ${jsonReport}"
+
+                    // 심각도에서 우선 순위로의 매핑 정의
+                    def severityToPriority = [
+                        'critical': 4, // 긴급
+                        'high'    : 3, // 높음
+                        'medium'  : 2, // 보통
+                        'low'     : 1  // 낮음
+                    ]
+
+                    // 심각도 통계 계산
+                    def severityStats = [
+                        'critical': 0,
+                        'high'    : 0,
+                        'medium'  : 0,
+                        'low'     : 0
+                    ]
+
+                    jsonReport.dependencies.each { dependency ->
+                        if (dependency.vulnerabilities) {
+                            dependency.vulnerabilities.each { vulnerability ->
+                                def severity = vulnerability.severity.toLowerCase()
+                                severityStats[severity] = severityStats[severity] + 1
+                            }
+                        }
+                    }
+
+                    // 상위 일감 생성
+                    def currentTime = new Date().format('yyMMdd.HH:mm')
+                    def parentIssueTitle = "[${currentTime}] Dependency-Check Result"
+                    def parentIssueDescription = """
+                        실행 시간: ${currentTime}
+                        Severity 통계:
+                        Critical: ${severityStats['critical']}
+                        High: ${severityStats['high']}
+                        Medium: ${severityStats['medium']}
+                        Low: ${severityStats['low']}
+                    """
+
+                    def parentIssueData = [
+                        issue: [
+                            project_id: 1,
+                            tracker_id: 11,
+                            subject: parentIssueTitle,
+                            description: parentIssueDescription
+                        ]
+                    ]
+
+                    def parentIssueResponse = httpRequest(
+                        httpMode: 'POST',
+                        url: 'https://redmine.toolchain.co.kr/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(parentIssueData)
+                    )
+
+                    def parentIssueId = readJSON(text: parentIssueResponse.content).issue.id
+                    println("Created parent Redmine issue: ${parentIssueId}")
+
+                    // 하위 일감 생성
+                    jsonReport.dependencies.each { dependency ->
+                        if (dependency.vulnerabilities) {
+                            dependency.vulnerabilities.each { vulnerability ->
+                                def redmineIssueTitle = "${dependency.fileName}"
+                                def redmineIssueDescription = """
+                                    Vulnerability: ${vulnerability.name}
+                                    Description: ${vulnerability.description}
+                                    Severity: ${vulnerability.severity}
+                                    File Path: ${dependency.filePath}
+                                    SHA-1: ${dependency.sha1}
+                                    SHA-256: ${dependency.sha256}
+                                    References: ${dependency.references.collect { it.url }.join(', ')}
+                                """
+
+                                // 심각도를 소문자로 변환 후 Redmine 우선 순위 ID로 매핑
+                                def priorityId = severityToPriority[vulnerability.severity.toLowerCase()] ?: 2 // Default to '보통' if not found
+
+                                def redmineIssueData = [
+                                    issue: [
+                                        project_id: 1,
+                                        tracker_id: 11,
+                                        subject: redmineIssueTitle,
+                                        description: redmineIssueDescription,
+                                        priority_id: priorityId,
+                                        parent_issue_id: parentIssueId
+                                    ]
+                                ]
+
+                                def response = httpRequest(
+                                    httpMode: 'POST',
+                                    url: 'https://redmine.toolchain.co.kr/issues.json',
+                                    acceptType: 'APPLICATION_JSON',
+                                    contentType: 'APPLICATION_JSON',
+                                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                                )
+
+                                println("Created Redmine sub-issue: ${response}")
+                            }
+                        }
+                    }
+
+                    // HTML 보고서 첨부
+                    def htmlFilePath = "${reportOutput}/dependency-check-report.html"
+
+                    // Upload the file
+                    def uploadResponse = httpRequest(
+                        url: "https://redmine.toolchain.co.kr/uploads.json",
+                        httpMode: 'POST',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                        requestBody: readFile(file: htmlFilePath, encoding: 'ISO-8859-1'),
+                        validResponseCodes: '201'
+                    )
+
+                    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                    echo "Upload Token: ${uploadToken}"
+
+                    // Attach the file to the issue
+                    def attachmentData = [
+                        issue: [
+                            uploads: [
+                                [
+                                    token: uploadToken,
+                                    filename: 'dependency-check-report.html',
+                                    content_type: 'text/html'
+                                ]
+                            ]
+                        ]
+                    ]
+
+                    httpRequest(
+                        url: "https://redmine.toolchain.co.kr/issues/${parentIssueId}.json",
+                        httpMode: 'PUT',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                    )
                 }
             }
         }
@@ -38,7 +181,7 @@ pipeline {
 
     post {
         always {
-            dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            dependencyCheckPublisher pattern: '**/dependency-check-report.json'
         }
     }
 }

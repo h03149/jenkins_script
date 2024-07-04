@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+
+    environment {
+        SVN_REPO_URL = 'http://192.168.128.1/svn/gradle-basic/'
+        GITEA_REPO_URL = 'http://192.168.128.1:4000/jinho.han/svn_mirror.git'
+        GITEA_REPO_DIR = 'svn_mirror'
+        BRANCH = 'master' // Gitea 리포지토리의 사용할 브랜치 이름
+        GIT_USER_NAME = 'jinho.han' // Git 사용자 이름
+        GIT_USER_EMAIL = 'jinho.han@kt.com' // Git 사용자 이메일
+    }
+
+    stages {
+        stage('Checkout from SVN') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'svn_credentials', passwordVariable: 'SVN_PASSWORD', usernameVariable: 'SVN_USERNAME')]) {
+                        checkout([
+                            $class: 'SubversionSCM',
+                            locations: [[credentialsId: 'svn_credentials', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: "${SVN_REPO_URL}"]],
+                            workspaceUpdater: [$class: 'UpdateUpdater']
+                        ])
+                    }
+                }
+            }
+        }
+        
+        stage('Clone or Initialize Gitea Repo') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'gitea_token', variable: 'GITEA_TOKEN')]) {
+                        sh """
+                        if git ls-remote ${GITEA_REPO_URL} -q; then
+                            git clone http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')} ${GITEA_REPO_DIR}
+                        else
+                            mkdir ${GITEA_REPO_DIR}
+                            cd ${GITEA_REPO_DIR}
+                            git init
+                            git remote add origin http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')}
+                        fi
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Fetch from SVN') {
+            steps {
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        withCredentials([usernamePassword(credentialsId: 'svn_credentials', usernameVariable: 'SVN_USER', passwordVariable: 'SVN_PASS')]) {
+                            sh """
+                            svn export --force ${SVN_REPO_URL} --username ${SVN_USER} --password ${SVN_PASS} ./
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push to Gitea') {
+            steps {
+                dir("${GITEA_REPO_DIR}") {
+                    script {
+                        sh """
+                        git config user.name "${GIT_USER_NAME}"
+                        git config user.email "${GIT_USER_EMAIL}"
+                        """
+                        withCredentials([string(credentialsId: 'gitea_token', variable: 'GITEA_TOKEN')]) {
+                            sh """
+                            git add .
+                            git commit -m "Automated commit from SVN"
+                            git checkout -B ${BRANCH}
+                            git push http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')} ${BRANCH}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            deleteDir() // 작업 완료 후 임시 파일 삭제
+        }
+    }
+}

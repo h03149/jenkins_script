@@ -1,0 +1,79 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: python
+    image: python:3.8
+    command: ['cat']
+    tty: true
+  - name: maven
+    image: maven:3.8.1-jdk-11
+    command: ['cat']
+    tty: true
+    env:
+      - name: JAVA_HOME
+        value: /usr/local/openjdk-11
+"""
+        }
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                container('python') {
+                    sh '''
+                        git clone https://36d117a5b92aac6ac4f5673166f62ee181f288e9@gitea.toolchain.co.kr/k933167h/websample.git .
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                container('maven') {
+                    sh '''
+                        chmod +x mvnw
+                        mvn clean install -Dmaven.test.skip=true
+                    '''
+                }
+            }
+        }
+
+        stage('Setup Python Environment') {
+            steps {
+                container('python') {
+                    sh '''
+                        pip3 install --upgrade pip
+                        pip3 install virtualenv
+                        pip3 install fosslight_scanner
+                        echo "Python 환경 및 fosslight 설치 완료"
+                    '''
+                }
+            }
+        }
+
+        stage('Run FOSSLight Scanner') {
+            steps {
+                container('python') {
+                    sh '''
+                        virtualenv -p /usr/local/bin/python3.8 /venv
+                        . /venv/bin/activate
+                        which fosslight
+                        fosslight --version
+                        fosslight all -p . -f excel -o test-result
+                    '''
+                }
+            }
+        }
+
+        stage('Archive Reports') {
+            steps {
+                archiveArtifacts artifacts: 'test-result/*', allowEmptyArchive: true
+            }
+        }
+    }
+}

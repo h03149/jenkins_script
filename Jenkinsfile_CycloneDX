@@ -1,0 +1,27 @@
+pipeline {
+    agent any
+    
+    environment {
+        MVN_HOME = tool 'jenkins_Maven_3_9_6'
+    }
+    
+    stages {
+        stage('Download Build Artifacts') {
+            steps {
+                cleanWs()
+                copyArtifacts(projectName: 'jinho_test(build)', selector: lastSuccessful())
+            }
+        }
+        stage('Generate SBOM') {
+            steps {
+                // CycloneDX 툴체인을 사용하여 SBOM 생성
+                sh '${MVN_HOME}/bin/mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom' // 예: Maven 프로젝트
+            }
+        }
+        stage('Save Artifact') {
+            steps {
+                archiveArtifacts artifacts: 'target/bom.xml', allowEmptyArchive: true
+            }
+        }
+    }
+}

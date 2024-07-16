@@ -22,11 +22,12 @@ pipeline {
                 script {
                     def reportOutput = "${env.WORKSPACE}/dependency-check-report"
 
+                    // Dependency-Check 실행
                     sh """
                         echo "Dependency-Check Home: ${DEPENDENCY_CHECK_HOME}"
-                        ls -l ${DEPENDENCY_CHECK_HOME}/dependency-check/bin
-                        ${DEPENDENCY_CHECK_HOME}/dependency-check/bin/dependency-check.sh \
-                        --project "gradle-basic" \
+                        ls -l ${DEPENDENCY_CHECK_HOME}/bin
+                        ${DEPENDENCY_CHECK_HOME}/bin/dependency-check.sh \
+                        --project "websample" \
                         --scan "${env.WORKSPACE}" \
                         --format JSON \
                         --format HTML \

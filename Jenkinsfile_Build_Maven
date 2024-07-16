@@ -1,0 +1,103 @@
+pipeline {
+    agent any
+
+    environment {
+        MVN_HOME = tool 'jenkins_Maven_3_9_6'
+
+        folderName = "gradle-basic"
+        //folderName = "jinho_test_pi_game-dev"
+        
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        jenkinsUrl = "https://jenkins.toolchain.co.kr/job/jinho_test(build)"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                git "https://36d117a5b92aac6ac4f5673166f62ee181f288e9@gitea.toolchain.co.kr/k933167h/websample.git"
+                echo 'git checkout'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                //sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
+                //sh './gradlew clean build -x test'
+                
+                //Maven 프로젝트 스캔
+                sh '${MVN_HOME}/bin/mvn clean install -Dmaven.test.skip=true'
+            }
+        }
+        
+        stage('Archive Build Artifacts') {
+            steps {
+                archiveArtifacts artifacts: '**/*', allowEmptyArchive: true
+            }
+        }
+    }
+    
+    post { 
+        always {
+            script {
+                def jobName = env.JOB_NAME
+                echo "jobName: ${jobName}"
+                def buildNumber = currentBuild.number
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def buildStartTime = new Date(currentBuild.startTimeInMillis)
+                def buildDuration = currentBuild.durationString.replace(' and counting', '')
+                def buildEndTime = new Date()
+                
+                def redmineIssueTitle = "Build Check: [${buildResult}] _ Build Time: ${buildStartTime.format('yyyy-MM-dd HH:mm:ss')}"
+                def redmineIssueDescription = """
+                - 빌드 결과: ${buildResult}
+                - 빌드 시작 시간: ${buildStartTime.format('yyyy-MM-dd HH:mm:ss')}
+                - 빌드 소요 시간: ${buildDuration}
+                - 빌드 번호: ${currentBuild.number}
+                - 링크: ${jenkinsUrl}/${currentBuild.number}/
+                """
+    
+                def redmineIssueData = [
+                    issue: [
+                        project_id: 1,
+                        tracker_id: 5,
+                        subject: redmineIssueTitle,
+                        description: redmineIssueDescription
+                    ]
+                ]
+                
+                def response = httpRequest(
+                    httpMode: 'POST',
+                    url: 'https://redmine.toolchain.co.kr/issues.json',
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                )
+                
+                echo "Redmine Issue Created: ${response}"
+                
+                // 빌드 결과에 따라 후속 파이프라인 실행(Sonarqube 실행)
+                if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
+                    echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
+                    build job: 'jinho_test(qualitygate)', wait: false
+                } else if (currentBuild.result == 'FAILURE') {
+                    echo 'Build failed. report redmine.'
+                }
+                // 빌드 결과에 따라 후속 파이프라인 실행(테스트 단계)
+                /*
+                if (currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE') {
+                    echo 'Build succeeded or unstable. report redmine & Triggering quality gate pipeline.'
+                    build job: 'jinho_test(test)', wait: false, parameters: [
+                        string(name: 'JOB_NUMBER', value: buildNumber.toString()),
+                        string(name: 'JOB_RESULT', value: buildResult),
+                        string(name: 'JOB_NAME', value: jobName)
+                    ]
+                } else if (currentBuild.result == 'FAILURE') {
+                    echo 'Build failed. report redmine.'
+                }
+                */
+            }
+        }
+    }
+}

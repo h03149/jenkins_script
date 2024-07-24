@@ -1,0 +1,311 @@
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/TestToolchain/Build'
+        }
+    }
+
+    environment {
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+
+    stages {
+        stage('Run Tests') {
+            steps {
+                script {
+                    sh """
+                        chmod +x ./gradlew
+                        ./gradlew test jacocoTestReport
+                    """
+                    
+                    junit 'build/test-results/test/**/*.xml'
+                }
+            }
+        }
+        
+        stage('JUnit report') {
+            steps {
+                script {
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                    // URL에서 리포지토리 이름을 추출
+                    def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+
+                    def jobName = env.JOB_NAME
+                    def buildNumber = currentBuild.number
+
+                    // 테스트 결과 파일들을 찾기
+                    def xmlFiles = findFiles(glob: 'build/test-results/test/**/*.xml')
+                    echo "xmlFiles: ${xmlFiles}"
+
+                    // 디버깅: 찾은 파일 리스트 출력
+                    if (xmlFiles.length == 0) {
+                        error "No XML files found!"
+                    } else {
+                        echo "Found XML files: ${xmlFiles.collect { it.path }.join(', ')}"
+                    }
+
+                    // 각 XML 파일을 순회하며 테스트 케이스와 실패 메시지 추출
+                    xmlFiles.each { xmlFile ->
+                        echo "Processing file: ${xmlFile.path}"
+                        def xmlContent = readFile(xmlFile.path)
+                        echo "XML Content:\n${xmlContent}"  // XML 파일 내용 출력
+
+                        // 전체 테스트 스위트 결과 추출
+                        def testsuitesPattern = /<testsuites[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+                        def testsuitePattern = /<testsuite[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" name="([^"]+)" skipped="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+
+                        def testsuitesMatches = []
+                        def testsuiteMatches = []
+
+                        (xmlContent =~ testsuitesPattern).each { match ->
+                            testsuitesMatches << match
+                        }
+
+                        (xmlContent =~ testsuitePattern).each { match ->
+                            testsuiteMatches << match
+                        }
+
+                        testsuitesMatches.each { match ->
+                            echo """
+                            Overall Test Suites:
+                            Disabled: ${match[1]}
+                            Errors: ${match[2]}
+                            Failures: ${match[3]}
+                            Total Tests: ${match[4]}
+                            Total Time: ${match[5]}
+                            """
+                        }
+
+                        testsuiteMatches.each { match ->
+                            echo """
+                            Test Suite:
+                            Name: ${match[4]}
+                            Disabled: ${match[1]}
+                            Errors: ${match[2]}
+                            Failures: ${match[3]}
+                            Skipped: ${match[5]}
+                            Total Tests: ${match[6]}
+                            Total Time: ${match[7]}
+                            """
+                        }
+
+                        // 정규 표현식을 사용하여 classname, name, time, 실패 사유 추출
+                        def testCasePattern = /<testcase name="([^"]+)" classname="([^"]+)" time="([^"]+)"(?:>(.*?)<\/testcase>|\/>)/
+                        def failurePattern = /<failure message="([^"]+)" type="([^"]+)">(.*?)<\/failure>/
+                        def errorPattern = /<error message="([^"]+)" type="([^"]+)">(.*?)<\/error>/
+                        def skippedPattern = /<skipped\/>/
+
+                        def testCaseMatches = []
+
+                        (xmlContent =~ testCasePattern).each { match ->
+                            testCaseMatches << match
+                        }
+
+                        testCaseMatches.each { match ->
+                            def testName = match[1]
+                            def className = match[2]
+                            def time = match[3]
+                            def testCaseContent = match[4] ?: ''
+                            def failureMessage = ''
+                            def errorMessage = ''
+                            def skippedMessage = ''
+                            def statusText = 'SUCCESS'
+                            def issueStatusId = 1
+
+                            // 실패 메시지 추출
+                            def failureMatches = []
+                            (testCaseContent =~ failurePattern).each { fmatch ->
+                                failureMatches << fmatch
+                            }
+                            if (failureMatches) {
+                                failureMatches.each { fmatch ->
+                                    failureMessage = "Failure: ${fmatch[1]}, Type: ${fmatch[2]}, Message: ${fmatch[3]}"
+                                    statusText = 'FAILURE'
+                                    issueStatusId = 2
+                                }
+                            }
+
+                            // 오류 메시지 추출
+                            def errorMatches = []
+                            (testCaseContent =~ errorPattern).each { ematch ->
+                                errorMatches << ematch
+                            }
+                            if (errorMatches) {
+                                errorMatches.each { ematch ->
+                                    errorMessage = "Error: ${ematch[1]}, Type: ${ematch[2]}, Message: ${ematch[3]}"
+                                    statusText = 'ERROR'
+                                    issueStatusId = 3
+                                }
+                            }
+
+                            // 스킵 메시지 확인
+                            if (testCaseContent =~ skippedPattern) {
+                                skippedMessage = "Test was skipped."
+                                statusText = 'SKIPPED'
+                                issueStatusId = 4
+                            }
+
+                            def issueSubject = "[${repoName}][${jobName}_JUnit][${buildNumber}]-[${testName}:${statusText}]"
+                            def issueDescription = """
+Test Case:
+Class: ${className}
+Name: ${testName}
+Time: ${time}
+${failureMessage}
+${errorMessage}
+${skippedMessage}
+"""
+                            echo "${issueDescription}"
+
+                            def redmineIssueData = [
+                                issue: [
+                                    project_id: 6,
+                                    tracker_id: 7,
+                                    subject: issueSubject,
+                                    description: issueDescription
+                                ]
+                            ]
+
+                            echo "${redmineIssueData}"
+
+                            def response = httpRequest(
+                                httpMode: 'POST',
+                                url: 'http://redmine:3000/issues.json',
+                                acceptType: 'APPLICATION_JSON',
+                                contentType: 'APPLICATION_JSON',
+                                customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('JaCoCo report') {
+            steps {
+                script {
+                    // 1. 이슈 생성
+                    // 2. zip 파일 생성
+                    // 3. zip 파일 이슈에 첨부
+
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                    // URL에서 리포지토리 이름을 추출
+                    def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                    
+                    def jobName = env.JOB_NAME
+                    def buildNumber = currentBuild.number
+
+                    // 1. 이슈 생성
+                    // HTML 보고서 내용을 읽어 변수에 저장
+                    def htmlContent = readFile(file: 'build/jacocoHtml/index.html')
+
+                    // Line Coverage와 Branch Coverage 추출
+                    def lineCoverage = "N/A"
+                    def branchCoverage = "N/A"
+
+                    // tfoot 부분 파싱
+                    def tfootStart = htmlContent.indexOf('<tfoot>')
+                    def tfootEnd = htmlContent.indexOf('</tfoot>') + 8
+
+                    def tfootContent = htmlContent.find(/<tfoot>.*?<\/tfoot>/)
+                    if (tfootContent) {
+                        // Line Coverage 추출
+                        def lineCoverageMatch = tfootContent.find(/<td>Total<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>/)
+                        if (lineCoverageMatch) {
+                            lineCoverage = lineCoverageMatch.replaceAll(/.*<td>Total<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>.*/, '$1')
+                        }
+
+                        // Branch Coverage 추출
+                        def branchCoverageMatch = tfootContent.find(/<td class="ctr2">(\d+)%<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>/)
+                        if (branchCoverageMatch) {
+                            branchCoverage = branchCoverageMatch.replaceAll(/.*<td class="ctr2">(\d+)%<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>.*/, '$3')
+                        }
+                    }
+
+                    // 이슈 생성 데이터 구성
+                    def issueSubject = "[${repoName}][${jobName}_JaCoCo][${buildNumber}]-[Line:${lineCoverage}%/Branch:${branchCoverage}%]"
+
+                    def redmineIssueData = [
+                        issue: [
+                            project_id: 6,
+                            tracker_id: 12,
+                            subject: issueSubject,
+                            description: htmlContent
+                        ]
+                    ]
+
+                    // Redmine 이슈 생성
+                    def createIssueResponse = httpRequest(
+                        httpMode: 'POST',
+                        url: 'http://redmine:3000/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                    )
+
+                    // 생성된 이슈의 ID 추출
+                    def issueId = readJSON(text: createIssueResponse.content).issue.id
+                    echo "Created Issue ID: ${issueId}"
+
+                    // 2. zip 파일 생성
+                    /* src, jacoco 압축 전달
+                    def zipFilePath = "jacocoHtml_with_sources.zip"
+
+                    def directoriesToZip = [
+                        'build/jacocoHtml/**',
+                        'src/main/java/**',
+                        'src/test/java/**'
+                    ]
+                    zip zipFile: zipFilePath, archive: false, dir: '', glob: directoriesToZip.join(','), overwrite: true
+                    */
+
+                    def zipFilePath = "build/jacocoHtml.zip"
+                    def sourceDir = "build/jacocoHtml"
+
+                    // Create the zip file without changing directory
+                    zip zipFile: zipFilePath, archive: false, dir: sourceDir, overwrite: true
+
+                    // 3. 이슈에 zip 파일 첨부
+
+                    // Upload the file
+                    def uploadResponse = httpRequest(
+                        url: "http://redmine:3000/uploads.json",
+                        httpMode: 'POST',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                        requestBody: readFile(file: zipFilePath, encoding: 'ISO-8859-1'),
+                        validResponseCodes: '201'
+                    )
+
+                    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                    echo "Upload Token: ${uploadToken}"
+
+                    // Attach the file to the issue
+                    def attachmentData = [
+                        issue: [
+                            uploads: [
+                                [
+                                    token: uploadToken,
+                                    filename: 'jacocoHtml.zip',
+                                    content_type: 'application/zip'
+                                ]
+                            ]
+                        ]
+                    ]
+
+                    httpRequest(
+                        url: "http://redmine:3000/issues/${issueId}.json",
+                        httpMode: 'PUT',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                    )
+                }
+            }
+        }
+    }
+}

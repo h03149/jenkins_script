@@ -1,0 +1,138 @@
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/TestToolchain/Build'
+        }
+    }
+    
+    environment {
+        sonarApiToken = credentials('sonarqube_token')
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+
+    stages {
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    withSonarQubeEnv('sonarqube') {
+                        def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                        // URL에서 리포지토리 이름을 추출
+                        def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+
+                        // SonarQube 스캔 실행
+                        sh """
+                            chmod +x ./gradlew
+                            ./gradlew -Dsonar.projectKey=${repoName} -Dsonar.projectName="${repoName}" -Dsonar.plugins.downloadOnlyRequired=true -Dsonar.java.binaries=build sonar
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    timeout(time: 1, unit: 'MINUTES') {
+                        def qg = waitForQualityGate()
+                        echo "Quality Gate status: ${qg.status}"
+                        if (qg.status != 'OK') {
+                            error "Quality Gate failed: ${qg.status}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post { 
+        always {
+            script {
+                def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                // URL에서 리포지토리 이름을 추출
+                def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                // SonarQube 프로젝트 검색
+                def qualityGateProject = httpRequest(
+                    httpMode: 'GET',
+                    url: "http://sonarqube:9000/api/projects/search?projects=${repoName}",
+                    acceptType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
+                )
+                def json_t = readJSON text: qualityGateProject.content
+                def qualityGateTime = json_t.components[0].lastAnalysisDate
+                
+                // UTC 시간 -> UTC+9로 변환
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ")
+                def parsedDate = dateFormat.parse(qualityGateTime)
+                def calendar = java.util.Calendar.getInstance()
+                calendar.setTime(parsedDate)
+                def qualityGateTimeKST = dateFormat.format(calendar.getTime())
+                
+                // SonarQube Quality Gate 상태 조회
+                def qualityGateResult = httpRequest(
+                    httpMode: 'GET',
+                    url: "http://sonarqube:9000/api/qualitygates/project_status?projectKey=${repoName}",
+                    acceptType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
+                )
+                
+                def json = readJSON text: qualityGateResult.content
+                def qualityGateStatus = json.projectStatus.status
+                def conditions = json.projectStatus.conditions
+                
+                // overall / new 분리
+                def overallConditions = conditions.findAll { !it.metricKey.contains("new") }
+                def newConditions = conditions.findAll { it.metricKey.contains("new") }
+
+                // 보고 방식 Metric : [] | Status : [] | Actual Value : [결과/조건]/[단위(%인 경우에만)]
+                def formatCondition = { condition ->
+                    def actualValue = condition.actualValue ?: 'N/A'
+                    def errorThreshold = condition.errorThreshold ?: 'N/A'
+                    def unit = condition.comparator == 'LT' ? '%' : ''
+                    return "- Metric: ${condition.metricKey} | Status: ${condition.status} | Actual Value: ${actualValue}/${errorThreshold}${unit}"
+                }
+                
+                // Redmine report
+
+                def redmineIssueTitle = "[${repoName}][${env.JOB_NAME}][${currentBuild.number}]-[${qualityGateStatus}]"
+                def redmineIssueDescription = """
+- QualityGate 결과: ${qualityGateStatus}
+
+[Overall]
+${overallConditions.collect { formatCondition(it) }.join('\n')}
+
+---------------------------------
+
+[New]
+${newConditions.collect { formatCondition(it) }.join('\n')}
+
+---------------------------------
+
+- 링크: http://sonarqube:9000/dashboard?id=${repoName}
+                """
+                
+                def redmineIssueData = [
+                    issue: [
+                        project_id: 6,
+                        tracker_id: 9,
+                        subject: redmineIssueTitle,
+                        description: redmineIssueDescription
+                    ]
+                ]
+                
+                def response = httpRequest(
+                    httpMode: 'POST',
+                    url: 'http://redmine:3000/issues.json',
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                )
+
+                echo "Redmine Issue Created: ${response}"
+            }
+        }
+    }
+}

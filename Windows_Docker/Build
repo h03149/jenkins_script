@@ -1,1 +1,90 @@
+pipeline {
+    agent any
+  
+    environment {
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
 
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git"
+                echo 'git checkout'
+            }
+        }
+        
+        stage('Record Repository Name') {
+            steps {
+                script {
+                    // git 명령어로 origin URL을 가져옴
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                    // URL에서 리포지토리 이름을 추출
+                    def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                    
+                    // 리포지토리 이름을 파일에 기록
+                    writeFile file: 'repo_name.txt', text: repoName
+                }
+            }
+        }
+    
+        stage('Build') {
+            steps {
+                sh 'chmod +x ./gradlew' // gradlew 실행 권한 부여
+                sh './gradlew clean build -x test'
+            }
+        }
+        
+        stage('Archive Build Artifacts') {
+            steps {
+                archiveArtifacts artifacts: '**/*', allowEmptyArchive: true
+            }
+        }
+    }
+
+    post { 
+        always {
+            script {
+                def jobName = env.JOB_NAME
+                echo "jobName: ${jobName}"
+                def buildNumber = currentBuild.number
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def buildStartTime = new Date(currentBuild.startTimeInMillis)
+                def buildDuration = currentBuild.durationString.replace(' and counting', '')
+                def buildEndTime = new Date()
+                def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                // URL에서 리포지토리 이름을 추출
+                def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+
+                def redmineIssueTitle = "[${repoName}][${jobName}][${currentBuild.number}]-[${buildResult}]"
+                def redmineIssueDescription = """
+- 빌드 결과: ${buildResult}
+- 빌드 시작 시간: ${buildStartTime.format('yyyy-MM-dd HH:mm:ss')}
+- 빌드 소요 시간: ${buildDuration}
+- 빌드 번호: ${currentBuild.number}
+"""
+    
+                def redmineIssueData = [
+                    issue: [
+                        project_id: 6,
+                        tracker_id: 8,
+                        subject: redmineIssueTitle,
+                        description: redmineIssueDescription
+                    ]
+                ]
+                
+                def response = httpRequest(
+                    httpMode: 'POST',
+                    url: 'http://redmine:3000/issues.json',
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                    requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                )
+                
+                echo "Redmine Issue Created: ${response}"
+            }
+        }
+    }
+}

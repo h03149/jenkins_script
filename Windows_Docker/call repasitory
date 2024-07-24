@@ -1,0 +1,51 @@
+// Artifacts 호출 시
+pipeline {
+    agent any
+    
+    stages {
+        
+        stage('Download Build Artifacts') {
+            steps {
+                cleanWs()
+                copyArtifacts(projectName: 'TestToolchain/Build', selector: lastSuccessful())
+            }
+        }
+        
+        stage('Get Repository Name') {
+            steps {
+                script {
+                    // repo_name.txt 파일에서 리포지토리 이름 읽기
+                    def repoName = readFile('repo_name.txt').trim()
+                    echo "Repository Name: ${repoName}"
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------------------------- //
+
+// node 호출 시
+pipeline {
+    agent {
+        node {
+            label ''
+            customWorkspace '/var/jenkins_home/workspace/TestToolchain/Build'
+        }
+    }
+    stages {
+        stage('Get Repository Name') {
+            steps {
+                script {
+                    // 커스텀 워크스페이스로 이동한 상태에서 git 명령어 실행
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    
+                    // URL에서 리포지토리 이름을 추출
+                    def repoName = gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                    
+                    echo "Repository Name: ${repoName}"
+                }
+            }
+        }
+    }
+}

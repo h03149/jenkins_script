@@ -1,0 +1,128 @@
+pipeline {
+    agent any
+
+    environment {
+        JMETER_VERSION = '5.6.3'
+        JMETER_HOME = "${WORKSPACE}/apache-jmeter-${JMETER_VERSION}"
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        jmeterJmx = "example_test_plan.jmx"
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git url: 'http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/JMeter.git', branch: 'master'
+            }
+        }
+
+        stage('Run JMeter Tests') {
+            steps {
+                script {
+                    // JMeter 바이너리에 실행 권한 부여
+                    sh "chmod +x '${JMETER_HOME}/bin/jmeter'"
+                    // JMeter 테스트 실행
+                    sh "'${JMETER_HOME}/bin/jmeter' -n -t '${WORKSPACE}/${jmeterJmx}' -l test_results.jtl"
+                    echo "JMeter tests executed"
+                }
+            }
+        }
+
+        stage('Generate HTML Report') {
+            steps {
+                script {
+                    // JMeter 결과를 HTML 리포트로 변환
+                    sh "'${JMETER_HOME}/bin/jmeter' -g test_results.jtl -o '${WORKSPACE}/jmeter-report'"
+                    echo "HTML report generated"
+                }
+            }
+        }
+
+        stage('JMeter report') {
+            steps {
+                script {
+                    // 1. 이슈 생성
+                    // 2. zip 파일 생성
+                    // 3. zip 파일 이슈에 첨부
+
+                    // 1. 이슈 생성
+                    // HTML 보고서 내용을 읽어 변수에 저장
+                    def issueDescription = readFile(file: 'jmeter-report/statistics.json')
+
+                    // 이슈 생성 데이터 구성 - project 필요 (임시)
+                    def issueSubject = "[Project][${env.JOB_NAME}][${currentBuild.number}]-[${jmeterJmx}]"
+                    def redmineIssueData = [
+                        issue: [
+                            project_id: 6,
+                            tracker_id: 15,
+                            subject: issueSubject,
+                            description: issueDescription
+                        ]
+                    ]
+
+                    // Redmine 이슈 생성
+                    def createIssueResponse = httpRequest(
+                        httpMode: 'POST',
+                        url: 'http://redmine:3000/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                    )
+
+                    // 생성된 이슈의 ID 추출
+                    def issueId = readJSON(text: createIssueResponse.content).issue.id
+                    echo "Created Issue ID: ${issueId}"
+                    
+                    
+                    // 2. zip 파일 생성
+                    def zipFilePath = "jmeter-report.zip"
+                    def sourceDir = "jmeter-report"
+                    zip zipFile: zipFilePath, archive: false, dir: sourceDir, overwrite: true
+
+                    // 3. 이슈에 zip 파일 첨부
+
+                    // Upload the file
+                    def uploadResponse = httpRequest(
+                        url: "http://redmine:3000/uploads.json",
+                        httpMode: 'POST',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                        requestBody: readFile(file: zipFilePath, encoding: 'ISO-8859-1'),
+                        validResponseCodes: '201'
+                    )
+
+                    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                    echo "Upload Token: ${uploadToken}"
+
+                    // Attach the file to the issue
+                    def attachmentData = [
+                        issue: [
+                            uploads: [
+                                [
+                                    token: uploadToken,
+                                    filename: 'jmeter-report.zip',
+                                    content_type: 'application/zip'
+                                ]
+                            ]
+                        ]
+                    ]
+
+                    httpRequest(
+                        url: "http://redmine:3000/issues/${issueId}.json",
+                        httpMode: 'PUT',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'jmeter-report/**/*', allowEmptyArchive: true
+            cleanWs()
+            echo "Workspace cleaned"
+        }
+    }
+}

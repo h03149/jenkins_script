@@ -152,7 +152,7 @@ pipeline {
                           ]
 
                           httpRequest(
-                              url: "https://redmine.toolchain.co.kr/issues/${issueId}.json",
+                              url: "http://redmine:3000/issues/${issueId}.json",
                               httpMode: 'PUT',
                               contentType: 'APPLICATION_JSON',
                               customHeaders: [[name: 'X-Redmine-API-Key', value: env.REDMINE_API_KEY]],

@@ -1,0 +1,139 @@
+pipeline {
+    agent any
+    
+    environment {
+        PATH = "$PATH:/var/jenkins_home/.local/bin"
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+    
+    stages {
+        stage('Download Build Artifacts') {
+            steps {
+                cleanWs()
+                copyArtifacts(projectName: 'TestToolchain/Build', selector: lastSuccessful())
+            }
+        }
+        
+        stage('Install System Dependencies') {
+            steps {
+                sh '''
+                    sudo apt-get update
+                    sudo apt-get install -y libmagic1 python3-dev build-essential
+                    echo "System dependencies installed"
+                '''
+            }
+        }
+        
+        stage('Setup Python Environment') {
+            steps {
+                sh '''
+                    chmod +x ./gradlew
+                    pip3 install --upgrade pip
+                    pip3 install virtualenv
+                    pip3 install fosslight_scanner
+                    echo "Python 환경 및 fosslight 설치 완료"
+                '''
+            }
+        }
+
+        stage('Run FOSSLight Scanner') {
+            steps {
+                sh '''
+                    virtualenv -p /usr/bin/python3.11 ./venv
+                    . ./venv/bin/activate
+                    which fosslight
+                    fosslight --version
+                    fosslight all -p . -o test-result
+                '''
+            }
+        }
+
+        stage('FOSSLight report') {
+            steps {
+                script {
+                    // 1. 이슈 생성
+                    // 2. zip 파일 생성
+                    // 3. zip 파일 이슈에 첨부
+
+                    // repo_name.txt 파일에서 리포지토리 이름 읽기
+                    def repoName = readFile('repo_name.txt').trim()
+
+                    // 1. 이슈 생성
+        
+                    // 이슈 생성 데이터 구성
+                    def issueSubject = "[${repoName}][${env.JOB_NAME}][${currentBuild.number}]"
+                    def redmineIssueData = [
+                        issue: [
+                            project_id: 6,
+                            tracker_id: 14,
+                            subject: issueSubject,
+                            description: "FOSSLight Scanner Report"
+                        ]
+                    ]
+        
+                    // Redmine 이슈 생성
+                    def createIssueResponse = httpRequest(
+                        httpMode: 'POST',
+                        url: 'http://redmine:3000/issues.json',
+                        acceptType: 'APPLICATION_JSON',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                    )
+        
+                    // 생성된 이슈의 ID 추출
+                    def issueId = readJSON(text: createIssueResponse.content).issue.id
+                    echo "Created Issue ID: ${issueId}"
+                    
+                    // 2. xlsx 파일 찾기
+                    def xlsxFile = sh(script: "ls test-result/*.xlsx | head -n 1", returnStdout: true).trim()
+                    
+                    if (xlsxFile == "") {
+                        error "No xlsx file found in test-result directory"
+                    }
+        
+                    // 3. 이슈에 xlsx 파일 첨부
+        
+                    // Upload the file
+                    def uploadResponse = httpRequest(
+                        url: "http://redmine:3000/uploads.json",
+                        httpMode: 'POST',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                        requestBody: readFile(file: xlsxFile, encoding: 'ISO-8859-1'),
+                        validResponseCodes: '201'
+                    )
+                
+                    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                    echo "Upload Token: ${uploadToken}"
+                
+                    // Attach the file to the issue
+                    def attachmentData = [
+                        issue: [
+                            uploads: [
+                                [
+                                    token: uploadToken,
+                                    filename: xlsxFile.split('/').last(),
+                                    content_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                ]
+                            ]
+                        ]
+                    ]
+                
+                    httpRequest(
+                        url: "http://redmine:3000/issues/${issueId}.json",
+                        httpMode: 'PUT',
+                        contentType: 'APPLICATION_JSON',
+                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                    )
+                }
+            }
+        }
+
+        stage('Archive Reports') {
+            steps {
+                archiveArtifacts artifacts: 'test-result/*', allowEmptyArchive: true
+            }
+        }
+    }
+}

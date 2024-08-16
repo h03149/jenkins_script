@@ -1,0 +1,26 @@
+import jenkins.model.Jenkins
+import hudson.model.AbstractItem
+import com.cloudbees.hudson.plugins.folder.Folder
+ 
+// 재귀적으로 아이템을 탐색하며 빌드 히스토리를 삭제하는 함수
+def deleteBuildsRecursively(item) {
+    // 폴더인 경우 내부 아이템에 대해 재귀적으로 처리
+    if (item instanceof Folder) {
+        item.getItems().each { subItem ->
+            deleteBuildsRecursively(subItem)
+        }
+    } else if (item instanceof AbstractItem) {
+        // 빌드를 가진 일반 아이템의 빌드 삭제
+        item.getBuilds().each { build ->
+            build.delete()
+        }
+        item.updateNextBuildNumber(1)
+    }
+}
+ 
+// Jenkins 인스턴스의 모든 아이템에 대해 빌드 히스토리 삭제 수행
+Jenkins.instance.getAllItems(AbstractItem.class).each { item ->
+    deleteBuildsRecursively(item)
+}
+ 
+println("모든 빌드 히스토리가 삭제되었습니다.")

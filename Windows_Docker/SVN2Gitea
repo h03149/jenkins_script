@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+
+    environment {
+        SVN_REPO_URL = 'https://svn.example.com/repo' // SVN 리포지토리 URL
+        GITEA_REPO_URL = 'http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/svn_mirror.git'
+        SVN_BRANCH = 'trunk' // SVN 브랜치 (일반적으로 trunk)
+        GITEA_BRANCH = 'main'
+        GIT_USER_NAME = 'jinho.han'
+        GIT_USER_EMAIL = 'jinho.han@kt.com'
+    }
+
+    stages {
+        stage('Clone or Initialize Gitea Repo') {
+            steps {
+                script {
+                    sh """
+                    if git ls-remote ${GITEA_REPO_URL}; then
+                        git clone ${GITEA_REPO_URL} svn_mirror
+                        cd svn_mirror
+                    else
+                        mkdir svn_mirror
+                        cd svn_mirror
+                        git init
+                        git remote add origin ${GITEA_REPO_URL}
+                    fi
+                    """
+                }
+            }
+        }
+
+        stage('Fetch from SVN') {
+            steps {
+                script {
+                    sh """
+                    cd svn_mirror
+                    if ! git svn info; then
+                        git svn init ${SVN_REPO_URL} -T ${SVN_BRANCH}
+                    fi
+                    git svn fetch
+                    """
+                }
+            }
+        }
+
+        stage('Merge Changes') {
+            steps {
+                script {
+                    sh """
+                    cd svn_mirror
+                    git config user.name "${GIT_USER_NAME}"
+                    git config user.email "${GIT_USER_EMAIL}"
+                    git checkout -B ${GITEA_BRANCH}
+                    git merge remotes/git-svn --allow-unrelated-histories || true
+                    """
+                }
+            }
+        }
+
+        stage('Handle Merge Conflicts') {
+            steps {
+                script {
+                    def conflictFiles = sh(
+                        script: """
+                        cd svn_mirror
+                        git diff --name-only --diff-filter=U
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    if (conflictFiles) {
+                        echo "Merge conflicts detected in the following files:\n${conflictFiles}"
+                        
+                        // 충돌된 파일 제외하고 커밋
+                        sh """
+                        cd svn_mirror
+                        git merge --abort
+                        git reset --hard
+                        git merge -X ours remotes/git-svn || true
+                        """
+                    } else {
+                        echo "No merge conflicts detected."
+                    }
+                }
+            }
+        }
+
+        stage('Push to Gitea') {
+            steps {
+                script {
+                    sh """
+                    cd svn_mirror
+                    git push -u origin ${GITEA_BRANCH}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        cleanup {
+            deleteDir()
+        }
+    }
+}

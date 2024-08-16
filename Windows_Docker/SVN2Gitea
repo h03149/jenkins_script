@@ -2,25 +2,34 @@ pipeline {
     agent any
 
     environment {
-        SVN_REPO_URL = 'https://svn.example.com/repo' // SVN 리포지토리 URL
-        GITEA_REPO_URL = 'http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/svn_mirror.git'
-        SVN_BRANCH = 'trunk' // SVN 브랜치 (일반적으로 trunk)
-        GITEA_BRANCH = 'main'
-        GIT_USER_NAME = 'jinho.han'
-        GIT_USER_EMAIL = 'jinho.han@kt.com'
+        SVN_REPO_URL = 'http://172.22.32.1/svn/gradle-basic/'
+        GITEA_REPO_URL = 'http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@172.22.32.1:4000/jinho.han/svn_mirror.git'
+        GITEA_REPO_DIR = 'svn_mirror'
+        BRANCH = 'master' // Gitea 리포지토리의 사용할 브랜치 이름
+        GIT_USER_NAME = 'jinho.han' // Git 사용자 이름
+        GIT_USER_EMAIL = 'jinho.han@kt.com' // Git 사용자 이메일
     }
 
     stages {
-        stage('Clone or Initialize Gitea Repo') {
+        stage('SVN Checkout and Gitea Clone') {
             steps {
                 script {
+                    withCredentials([usernamePassword(credentialsId: 'svn_credentials', passwordVariable: 'SVN_PASSWORD', usernameVariable: 'SVN_USERNAME')]) {
+                        // SVN에서 최신 파일 체크아웃 및 임시 폴더로 내보내기
+                        checkout([
+                            $class: 'SubversionSCM',
+                            locations: [[credentialsId: 'svn_credentials', depthOption: 'infinity', ignoreExternalsOption: true, local: 'svn_export', remote: "${SVN_REPO_URL}"]],
+                            workspaceUpdater: [$class: 'UpdateUpdater']
+                        ])
+                    }
+
+                    // Gitea 리포지토리 클론 또는 초기화
                     sh """
-                    if git ls-remote ${GITEA_REPO_URL}; then
-                        git clone ${GITEA_REPO_URL} svn_mirror
-                        cd svn_mirror
+                    if git ls-remote ${GITEA_REPO_URL} -q; then
+                        git clone ${GITEA_REPO_URL} ${GITEA_REPO_DIR}
                     else
-                        mkdir svn_mirror
-                        cd svn_mirror
+                        mkdir ${GITEA_REPO_DIR}
+                        cd ${GITEA_REPO_DIR}
                         git init
                         git remote add origin ${GITEA_REPO_URL}
                     fi
@@ -29,57 +38,53 @@ pipeline {
             }
         }
 
-        stage('Fetch from SVN') {
+        stage('Merge SVN Files into Gitea') {
             steps {
-                script {
-                    sh """
-                    cd svn_mirror
-                    if ! git svn info; then
-                        git svn init ${SVN_REPO_URL} -T ${SVN_BRANCH}
-                    fi
-                    git svn fetch
-                    """
-                }
-            }
-        }
-
-        stage('Merge Changes') {
-            steps {
-                script {
-                    sh """
-                    cd svn_mirror
-                    git config user.name "${GIT_USER_NAME}"
-                    git config user.email "${GIT_USER_EMAIL}"
-                    git checkout -B ${GITEA_BRANCH}
-                    git merge remotes/git-svn --allow-unrelated-histories || true
-                    """
-                }
-            }
-        }
-
-        stage('Handle Merge Conflicts') {
-            steps {
-                script {
-                    def conflictFiles = sh(
-                        script: """
-                        cd svn_mirror
-                        git diff --name-only --diff-filter=U
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    if (conflictFiles) {
-                        echo "Merge conflicts detected in the following files:\n${conflictFiles}"
-                        
-                        // 충돌된 파일 제외하고 커밋
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        // SVN에서 가져온 파일들을 Gitea 리포지토리로 병합
                         sh """
-                        cd svn_mirror
-                        git merge --abort
-                        git reset --hard
-                        git merge -X ours remotes/git-svn || true
+                        rsync -av --exclude '.git/' ../svn_export/ ./
+                        git config user.name "${GIT_USER_NAME}"
+                        git config user.email "${GIT_USER_EMAIL}"
+
+                        git add .
+                        git commit -m "Automated commit from SVN"
                         """
-                    } else {
-                        echo "No merge conflicts detected."
+
+                        // 마스터 브랜치가 없는 경우 초기 브랜치 생성
+                        def isBranchExists = sh(
+                            script: "git show-ref refs/heads/${BRANCH}",
+                            returnStatus: true
+                        ) == 0
+
+                        if (!isBranchExists) {
+                            sh "git checkout -b ${BRANCH}"
+                        } else {
+                            sh """
+                            git fetch origin ${BRANCH} || true
+                            git merge --no-commit --no-ff origin/${BRANCH} || true
+                            """
+                        }
+
+                        // 충돌이 발생한 파일 처리
+                        def conflictFiles = sh(
+                            script: "git diff --name-only --diff-filter=U",
+                            returnStdout: true
+                        ).trim()
+
+                        if (conflictFiles) {
+                            echo "Merge conflicts detected in the following files:\n${conflictFiles}"
+                            // 충돌된 파일을 병합하지 않고 남기거나, 특정 정책에 따라 처리
+                            conflictFiles.split('\n').each { file ->
+                                sh "git rm --cached ${file}" // 충돌된 파일을 커밋에서 제외
+                            }
+                            sh """
+                            git commit -m "Merge without conflicts"
+                            """
+                        } else {
+                            echo "No merge conflicts detected."
+                        }
                     }
                 }
             }
@@ -87,19 +92,20 @@ pipeline {
 
         stage('Push to Gitea') {
             steps {
-                script {
-                    sh """
-                    cd svn_mirror
-                    git push -u origin ${GITEA_BRANCH}
-                    """
+                dir(GITEA_REPO_DIR) {
+                    script {
+                        sh """
+                        git push origin ${BRANCH}
+                        """
+                    }
                 }
             }
         }
     }
-    
+
     post {
         cleanup {
-            deleteDir()
+            deleteDir() // 작업 완료 후 임시 파일 삭제
         }
     }
 }

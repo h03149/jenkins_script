@@ -1,0 +1,19 @@
+# git init
+git config --global user.name "jinho.han"
+git config --global user.email "jinho.han@kt.com"
+git init
+git add .
+git commit -m "Init"
+git remote add origin http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@localhost:4000/jinho.han/REPASITIORY_NAME.git
+git push --set-upstream origin master
+
+# git remote add origin http://${GITEA_TOKEN}@${GITEA_REPO_URL.replace('http://', '')}
+# GITEA_TOKEN : b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e
+# BRANCH 변경은 git push 단계에서 변경 ex) master > main 
+
+# git fetch
+git fetch
+git merge
+git add -A
+git commit -m "commit text"
+git push

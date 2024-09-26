@@ -1,0 +1,143 @@
+version: "3"
+services:
+  redmine:
+    image: redmine:latest
+    container_name: redmine
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Asia/Seoul
+      - REDMINE_DB_POSTGRES=postgres
+      - REDMINE_DB_DATABASE=seedlabs
+      - REDMINE_DB_USERNAME=seedlabs
+      - REDMINE_DB_PASSWORD=seedlabs    
+    volumes:
+      - redmine_data:/usr/src/redmine/files
+    networks:
+      - tool_chain
+    restart: always
+
+  jenkins:
+    image: jenkins/jenkins:lts
+    container_name: jenkins
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Seoul
+    volumes:
+      - jenkins_data:/var/jenkins_home
+    networks:
+      - tool_chain
+    restart: always
+
+  ssh-agent:
+    image: jenkins/ssh-agent
+    environment:
+      - TZ=Asia/Seoul
+    networks:
+      - tool_chain
+    restart: always
+
+  sonarqube:
+    image: sonarqube:latest
+    container_name: sonarqube
+    ports:
+      - "9001:9000"
+    environment:
+      - TZ=Asia/Seoul
+      - SONARQUBE_JDBC_URL=jdbc:postgresql://postgres:5432/seedlabs
+      - SONARQUBE_JDBC_USERNAME=seedlabs
+      - SONARQUBE_JDBC_PASSWORD=seedlabs
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+    networks:
+      - tool_chain
+    restart: always
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    environment:
+      - TZ=Asia/Seoul
+      - POSTGRES_DB=seedlabs
+      - POSTGRES_USER=seedlabs
+      - POSTGRES_PASSWORD=seedlabs
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - tool_chain
+    restart: always
+
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    ports:
+      - "4000:3000"
+      - "222:22"
+    environment:
+      - TZ=Asia/Seoul
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=seedlabs
+      - GITEA__database__USER=seedlabs
+      - GITEA__database__PASSWD=seedlabs
+    restart: always
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+      - gitea_logs:/var/log/gitea
+    networks:
+      - tool_chain
+
+  lhci:
+    image: patrickhulce/lhci-server:latest
+    container_name: lhci
+    ports:
+      - "9003:9003"
+    environment:
+      - TZ=Asia/Seoul
+      - LHCI_STORAGE__SQL_DATABASE_URL=postgres://seedlabs:seedlabs@postgres:5432/lhci
+      - LHCI_PORT=9003
+    volumes:
+      - lhci_data:/data
+      - ./lighthouserc.json:/app/lighthouserc.json
+    networks:
+      - tool_chain
+    restart: always
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    container_name: mattermost
+    ports:
+      - "8065:8065"
+    environment:
+      - TZ=Asia/Seoul
+      - MM_CONFIG=/mattermost/config/config.json
+      - MM_SQLSETTINGS_DRIVERNAME=postgres
+      - MM_SQLSETTINGS_DATASOURCE=postgres://seedlabs:seedlabs@postgres:5432/mattermost?sslmode=disable
+    volumes:
+      - mattermost_data:/mattermost/data
+      - mattermost_config:/mattermost/config
+      - mattermost_logs:/mattermost/logs
+    networks:
+      - tool_chain
+    restart: always
+
+networks:
+  tool_chain:
+    driver: bridge
+
+volumes:
+  redmine_data:
+  jenkins_data:
+  sonarqube_data:
+  postgres_data:
+  gitea_data:
+  gitea_config:
+  gitea_logs:
+  lhci_data:
+  mattermost_data:
+  mattermost_config:
+  mattermost_logs:

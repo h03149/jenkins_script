@@ -1,0 +1,175 @@
+pipeline {
+    agent any
+    environment {
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        sonarApiToken = credentials('sonarqube_token')
+        MVN_HOME = tool 'jenkins_Maven_3_9_6' // Maven 환경 설정
+    }
+
+    stages {
+        // 1. Checkout 단계
+        stage('Checkout') {
+            steps {
+                cleanWs() // 작업 공간을 초기화
+                git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
+                
+                script {
+                    def config = readProperties file: '.ttc_config'
+                    env.FOLDER = config['FOLDER'] ?: '' // 폴더 경로
+                    env.BUILD_TOOL = config['BUILD_TOOL'] ?: error("BUILD_TOOL is required. Pipeline stopped.") // 빌드 도구 필수
+                    env.TEST_TOOL = config['TEST_TOOL'] ?: '' // 테스트 도구 (공백 가능)
+                    env.SONARQUBE_ANALYSIS = config['SONARQUBE_ANALYSIS'] ?: 'false' // SonarQube 분석 (기본값 false)
+
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    env.repoName = env.FOLDER ? env.FOLDER : gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                    
+                    // 폴더가 공백이면 현재 작업 디렉토리를 folderPath로 설정
+                    env.FOLDER = env.FOLDER ? env.FOLDER : sh(script: 'pwd', returnStdout: true).trim()
+                }
+            }
+        }
+
+         // 2. Build 단계
+        stage('Build') {
+            steps {
+                script {
+                    if (env.BUILD_TOOL == 'gradle') {
+                        // Gradle 빌드 및 권한 부여
+                        sh """
+                            cd ${env.FOLDER}
+                            chmod +x ./gradlew
+                            ./gradlew clean build -x test
+                        """
+                    } else if (env.BUILD_TOOL == 'maven') {
+                        // Maven 빌드
+                        sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn clean install -Dmaven.test.skip=true"
+                    } else {
+                        error "Unsupported build tool: ${env.BUILD_TOOL}. Pipeline stopped."
+                    }
+                }
+            }
+        }
+
+        // 3. Test 단계
+        stage('Test') {
+            when {
+                expression { env.TEST_TOOL } // TEST_TOOL이 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    // JUnit 테스트 실행 (Gradle & Maven 모두 가능)
+                    if (env.TEST_TOOL.contains('junit')) {
+                        if (env.BUILD_TOOL == 'gradle') {
+                            sh "cd ${env.FOLDER} && ./gradlew test"
+                        } else if (env.BUILD_TOOL == 'maven') {
+                            sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn test"
+                        }
+                        junit "build/test-results/**/*.xml"
+                    }
+
+                    // JaCoCo는 JUnit 테스트와 함께 실행되는 경우에만 리포트 생성 (Gradle & Maven 모두 가능)
+                    if (env.TEST_TOOL.contains('jacoco') && env.TEST_TOOL.contains('junit')) {
+                        if (env.BUILD_TOOL == 'gradle') {
+                            sh "cd ${env.FOLDER} && ./gradlew jacocoTestReport"
+                        } else if (env.BUILD_TOOL == 'maven') {
+                            sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn jacoco:report"
+                        }
+                        //jacoco execPattern: "${env.FOLDER}/build/jacoco/*.exec", classPattern: "${env.FOLDER}/build/classes/java/main", sourcePattern: "${env.FOLDER}/src/main/java"
+
+                    }
+
+                    // OpenClover는 Maven에서만 실행 가능
+                    if (env.TEST_TOOL.contains('openclover') && env.BUILD_TOOL == 'maven') {
+                        sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn clover:setup test clover:aggregate clover:clover"
+                    }
+                }
+            }
+        }
+
+        // 4. Quality Gate 단계 (SonarQube 분석)
+        stage('Quality Gate') {
+            when {
+                expression { env.SONARQUBE_ANALYSIS == 'true' } // SonarQube 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    if (env.BUILD_TOOL == 'gradle') {
+                        // Gradle SonarQube 분석
+                        sh """
+                            cd ${env.FOLDER}
+                            ./gradlew -Dsonar.host.url=http://sonarqube:9000 -Dsonar.login=${sonarApiToken} -Dsonar.projectKey=${env.repoName} -Dsonar.projectName="${env.repoName}" -Dsonar.plugins.downloadOnlyRequired=true -Dsonar.java.binaries=build sonar
+                        """
+                    } else if (env.BUILD_TOOL == 'maven') {
+                        // Maven SonarQube 분석
+                        sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn sonar:sonar -Dsonar.projectKey=${env.repoName} -Dsonar.projectName=${env.repoName} -Dsonar.plugins.downloadOnlyRequired=true"
+                    } else {
+                        error "Unsupported build tool for SonarQube: ${env.BUILD_TOOL}. Pipeline stopped."
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Redmine 이슈 생성 함수
+def createRedmineIssue(String projectId, String trackerId, String subject, String description) {
+    def redmineIssueData = [
+        issue: [
+            project_id: projectId,
+            tracker_id: trackerId,
+            subject: subject,
+            description: description
+        ]
+    ]
+
+    def response = httpRequest(
+        httpMode: 'POST',
+        url: 'http://redmine:3000/issues.json',
+        acceptType: 'APPLICATION_JSON',
+        contentType: 'APPLICATION_JSON',
+        customHeaders: [[name: 'X-Redmine-API-Key', value: env.redmineApiKey]], // 전역 환경 변수 사용
+        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+    )
+
+    def issueId = readJSON(text: response.content).issue.id
+    echo "Redmine Issue Created: ${issueId}"
+    return issueId
+}
+
+// Redmine 파일 첨부 함수
+def attachFileToRedmineIssue(String issueId, String filePath, String filename) {
+    // 파일 업로드
+    def uploadResponse = httpRequest(
+        url: "http://redmine:3000/uploads.json",
+        httpMode: 'POST',
+        customHeaders: [[name: 'X-Redmine-API-Key', value: env.redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']], // 전역 환경 변수 사용
+        requestBody: readFile(file: filePath, encoding: 'ISO-8859-1'),
+        validResponseCodes: '201'
+    )
+
+    def uploadToken = readJSON(text: uploadResponse.content).upload.token
+    echo "Upload Token: ${uploadToken}"
+
+    // 파일을 이슈에 첨부
+    def attachmentData = [
+        issue: [
+            uploads: [
+                [
+                    token: uploadToken,
+                    filename: filename,
+                    content_type: 'application/zip'
+                ]
+            ]
+        ]
+    ]
+
+    httpRequest(
+        url: "http://redmine:3000/issues/${issueId}.json",
+        httpMode: 'PUT',
+        contentType: 'APPLICATION_JSON',
+        customHeaders: [[name: 'X-Redmine-API-Key', value: env.redmineApiKey]], // 전역 환경 변수 사용
+        requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+    )
+
+    echo "File attached to Redmine Issue: ${issueId}"
+}

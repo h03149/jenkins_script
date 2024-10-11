@@ -1,0 +1,47 @@
+하나의 DB 테이블에 모든 컨테이너를 연결하여 문제가 발생함.
+
+해당 문제를 해결하면서 Jenkins Pipeline을 고도화 하였음
+더 작은 단위로 쪼개려고 하였으나, git에 .ttc_config 파일을 추가하여 
+build(gradle, maven)
+test(junit, jacoco, openclover)
+qualitygate(sonarqube)
+를 선택 실행하는 방법으로 구성함
+
+이외 추가로 하위 폴더 실행이 필요한 경우를 대비하여 folder 옵션도 추가하였음
+
+////////////아래는 예시 파일//////////////
+# 폴더 경로 (빈 값이면 최상위 폴더에서 작업)
+FOLDER=
+
+# 빌드 도구 (필수: gradle 또는 maven)
+BUILD_TOOL=gradle
+
+# 테스트 도구 (복합적으로 사용 가능: junit, jacoco, openclover)
+TEST_TOOL=junit,jacoco
+
+# SonarQube 분석 여부 (true 또는 false)
+SONARQUBE_ANALYSIS=true
+
+////////////////////////////////////////
+해석
+하위 폴더는 없으니 상위 폴더에서 실행함
+빌드 도구는 Gradle이며 Test는 Junit과 Jacoco를 수행함
+Sonarqube도 수행함
+
+현재 코드는 완성하였으나, Redmine report 하는 과정은 추가하지 않은 상태
+script에서 git에 있는 jenkins_script로 연결하여 사용할까 고민중(코드가 길어짐에 따라 작업환경 개선)
+
+TODO
+1. 통합 수행 결과 Redmine Report
+2. 통합 수행 후 Artifact로 구성(어디서 필요할지 모름)
+3. 검토 요청 후 추가로 연결할 내용 확인 소스코드가 필요한 내용이라면 모두 연결하는게 좋아보임(ex. SCACheck)
+4. Webhook 연동하여 gitea commit시 자동 실행
+
+DB 수정본 PC
+5. DB 수정본에 적용(통합 수행_Backend)
+6. 이미지 세이브
+7. LHCI, PlayWright, FOSSLight, JMeter 생성
+
+기존 PC
+8. 이미지 로드
+9. 기타 고려사항 체크

@@ -30,6 +30,8 @@ Sonarqube도 수행함
 
 현재 코드는 완성하였으나, Redmine report 하는 과정은 추가하지 않은 상태
 script에서 git에 있는 jenkins_script로 연결하여 사용할까 고민중(코드가 길어짐에 따라 작업환경 개선)
+>>> SCM 방식 시 pipeline에 이상한게 생김 checkout을 setup으로 변경? 하는 방식을 고려 중 checkout 후 폴더 리셋하면 안됨 수정 필요
+
 
 TODO
 1. 통합 수행 결과 Redmine Report

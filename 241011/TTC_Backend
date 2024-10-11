@@ -11,7 +11,8 @@ pipeline {
         stage('Checkout') {
             steps {
                 cleanWs() // 작업 공간을 초기화
-                git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
+                //git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
+                checkout scm // Jenkins의 SCM 설정을 통해 자동으로 Git 체크아웃
                 
                 script {
                     def config = readProperties file: '.ttc_config'

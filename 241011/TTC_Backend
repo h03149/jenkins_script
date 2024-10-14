@@ -1,17 +1,25 @@
 pipeline {
     agent any
+
+    tools {
+        'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation' 'Dependency-Check'
+    }
+
     environment {
+        DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check', type: 'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation'
+        NVD_API_KEY = credentials('NVD_api_key')
         redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
         sonarApiToken = credentials('sonarqube_token')
         MVN_HOME = tool 'jenkins_Maven_3_9_6' // Maven 환경 설정
+        PATH = "$PATH:/var/jenkins_home/.local/bin"
     }
 
     stages {
-        // 1. Checkout 단계
-        stage('Checkout') {
+        // 1. Setup 단계
+        stage('Setup') {
             steps {
-                cleanWs() // 작업 공간을 초기화
-                //git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
+                // cleanWs() // 작업 공간을 초기화
+                // git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
                 checkout scm // Jenkins의 SCM 설정을 통해 자동으로 Git 체크아웃
                 
                 script {
@@ -20,6 +28,8 @@ pipeline {
                     env.BUILD_TOOL = config['BUILD_TOOL'] ?: error("BUILD_TOOL is required. Pipeline stopped.") // 빌드 도구 필수
                     env.TEST_TOOL = config['TEST_TOOL'] ?: '' // 테스트 도구 (공백 가능)
                     env.SONARQUBE_ANALYSIS = config['SONARQUBE_ANALYSIS'] ?: 'false' // SonarQube 분석 (기본값 false)
+                    env.FOSSLIGHT = config['FOSSLIGHT'] ?: 'false' // FOSSLight 분석 (기본값 false)
+                    env.SCACHECK = config['SCACHECK'] ?: 'false' // SCACheck 분석 (기본값 false)
 
                     def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
                     env.repoName = env.FOLDER ? env.FOLDER : gitUrl.tokenize('/').last().replaceAll('.git$', '')
@@ -106,6 +116,61 @@ pipeline {
                     } else {
                         error "Unsupported build tool for SonarQube: ${env.BUILD_TOOL}. Pipeline stopped."
                     }
+                }
+            }
+        }
+
+        // 5. FOSSLight 단계
+        stage('FOSSLight') {
+            when {
+                expression { env.FOSSLIGHT == 'true' } // FOSSLight 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    sh """
+                        sudo apt-get update
+                        sudo apt-get install -y libmagic1 python3-dev build-essential
+                        python3 -m pip config set global.break-system-packages true
+                        echo "System dependencies installed"
+        
+                        pip3 install --upgrade pip
+                        pip3 install virtualenv
+                        pip3 install fosslight_scanner
+                        echo "Python 환경 및 fosslight 설치 완료"
+        
+                        cd ${env.FOLDER}
+                        virtualenv -p /usr/bin/python3.11 ./venv
+                        . ./venv/bin/activate
+                        which fosslight
+                        fosslight --version
+                        fosslight all -p . -o test-result
+                    """
+                }
+            }
+        }
+
+        // 6. SCACheck 단계(Dependency Check)
+        stage('SCACheck') {
+            when {
+                expression { env.SCACHECK == 'true' } // SonarQube 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    def reportOutput = "${env.WORKSPACE}/dependency-check-report"
+
+                    // Dependency-Check 실행
+                    sh """
+                        echo "Dependency-Check Home: ${DEPENDENCY_CHECK_HOME}"
+                        ls -l ${DEPENDENCY_CHECK_HOME}/bin
+                        ${DEPENDENCY_CHECK_HOME}/bin/dependency-check.sh \
+                        --project "${env.repoName}" \
+                        --scan "${env.WORKSPACE}" \
+                        --format JSON \
+                        --format HTML \
+                        --format XML \
+                        --out "${reportOutput}" \
+                        --nvdApiKey ${NVD_API_KEY}
+                    """
                 }
             }
         }

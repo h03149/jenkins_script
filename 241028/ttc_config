@@ -1,0 +1,16 @@
+# - FOLDER: 폴더 경로
+#   BUILD_TOOL: 빌드 도구 (필수: gradle 또는 maven)
+#   TEST_TOOL: 테스트 도구 (복합적으로 사용 가능: junit, jacoco, openclover)
+#   SONARQUBE_ANALYSIS: SonarQube 분석 여부 (true 또는 false)
+
+# 서브 프로젝트 sonar-scanner-gradle/gradle-basic 설정
+- FOLDER: sonar-scanner-gradle/gradle-basic  # 폴더 경로
+  BUILD_TOOL: gradle  # 빌드 도구 (필수: gradle 또는 maven)
+  TEST_TOOL: [junit, jacoco]  # 테스트 도구 (복합적으로 사용 가능: junit, jacoco, openclover)
+  SONARQUBE_ANALYSIS: false  # SonarQube 분석 여부 (true 또는 false)
+
+# 서브 프로젝트 sonar-scanner-maven/maven-basic 설정
+- FOLDER: sonar-scanner-maven/maven-basic
+  BUILD_TOOL: maven
+  TEST_TOOL: []
+  SONARQUBE_ANALYSIS: true

@@ -1,0 +1,565 @@
+pipeline {
+    agent any
+
+    tools {
+        'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation' 'Dependency-Check'
+    }
+
+    environment {
+        DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check', type: 'org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation'
+        NVD_API_KEY = credentials('NVD_api_key')
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+        sonarApiToken = credentials('sonarqube_token')
+        MVN_HOME = tool 'jenkins_Maven_3_9_6' // Maven 환경 설정
+        PATH = "$PATH:/var/jenkins_home/.local/bin"
+    }
+
+    stages {
+        // 1. Setup 단계
+        stage('Setup') {
+            steps {
+                // cleanWs() // 작업 공간을 초기화
+                // git "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/gradle-basic.git" // 프로젝트 Git 저장소에서 체크아웃
+                checkout scm // Jenkins의 SCM 설정을 통해 자동으로 Git 체크아웃
+                
+                script {
+                    def config = readProperties file: '.ttc_config'
+                    env.FOLDER = config['FOLDER'] ?: '' // 폴더 경로
+                    env.BUILD_TOOL = config['BUILD_TOOL'] ?: error("BUILD_TOOL is required. Pipeline stopped.") // 빌드 도구 필수
+                    env.TEST_TOOL = config['TEST_TOOL'] ?: '' // 테스트 도구 (공백 가능)
+                    env.SONARQUBE_ANALYSIS = config['SONARQUBE_ANALYSIS'] ?: 'false' // SonarQube 분석 (기본값 false)
+                    // env.FOSSLIGHT = config['FOSSLIGHT'] ?: 'false' // FOSSLight 분석 (기본값 false)
+                    // env.SCACHECK = config['SCACHECK'] ?: 'false' // SCACheck 분석 (기본값 false)
+
+                    def gitUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                    env.repoName = env.FOLDER ? env.FOLDER : gitUrl.tokenize('/').last().replaceAll('.git$', '')
+                    
+                    // 폴더가 공백이면 현재 작업 디렉토리를 folderPath로 설정
+                    env.FOLDER = env.FOLDER ? env.FOLDER : sh(script: 'pwd', returnStdout: true).trim()
+                }
+            }
+        }
+
+         // 2. Build 단계
+        stage('Build') {
+            steps {
+                script {
+                    def startTime = System.currentTimeMillis()
+                    try {
+                        echo "Starting Build stage at: ${new Date(startTime)}"
+                        // 실제 빌드 작업 수행
+                        if (env.BUILD_TOOL == 'gradle') {
+                        // Gradle 빌드 및 권한 부여
+                            sh """
+                                cd ${env.FOLDER}
+                                chmod +x ./gradlew
+                                ./gradlew clean build -x test
+                            """
+                        } else if (env.BUILD_TOOL == 'maven') {
+                            // Maven 빌드
+                            sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn clean install -Dmaven.test.skip=true"
+                        } else {
+                            error "Unsupported build tool: ${env.BUILD_TOOL}. Pipeline stopped."
+                        }
+                    } catch (Exception e) {
+                        currentBuild.result = 'FAILURE'
+                    } finally {
+                        def endTime = System.currentTimeMillis()
+                        def duration = (endTime - startTime) / 1000
+                        echo "Build stage completed at: ${new Date(endTime)}"
+                        echo "Build stage took: ${duration} seconds"
+
+                        def redmineIssueTitle = "[${env.repoName}][Build][${currentBuild.number}]-[SUCCESS]"
+                        def redmineIssueDescription = """
+- 빌드 결과: SUCCESS
+- 빌드 시작 시간: ${new Date(startTime).format('yyyy-MM-dd HH:mm:ss')}
+- 빌드 소요 시간: ${duration}
+- 빌드 번호: ${currentBuild.number}                        
+"""
+            
+                        def redmineIssueData = [
+                            issue: [
+                                project_id: 6,
+                                tracker_id: 8,
+                                subject: redmineIssueTitle,
+                                description: redmineIssueDescription
+                            ]
+                        ]
+                        
+                        def response = httpRequest(
+                            httpMode: 'POST',
+                            url: 'http://redmine:3000/issues.json',
+                            acceptType: 'APPLICATION_JSON',
+                            contentType: 'APPLICATION_JSON',
+                            customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                            requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. Test 단계
+        stage('Test') {
+            when {
+                expression { env.TEST_TOOL } // TEST_TOOL이 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    // JUnit 테스트 실행 (Gradle & Maven 모두 가능)
+                    def xmlFiles
+                    
+                    if (env.TEST_TOOL.contains('junit')) {
+                        try {
+                            if (env.BUILD_TOOL == 'gradle') {
+                                sh "cd ${env.FOLDER} && ./gradlew test"
+                                junit "build/test-results/**/*.xml"
+                                xmlFiles = findFiles(glob: 'build/test-results/test/**/*.xml')
+                            } else if (env.BUILD_TOOL == 'maven') {
+                                sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn test"
+                                junit "build/test-results/**/*.xml"
+
+                                xmlFiles = findFiles(glob: '**/target/surefire-reports/*.xml')
+                            }
+                        } catch (Exception e) {
+                            currentBuild.result = 'FAILURE'
+                        } finally {
+                            // 테스트 결과 파일들을 찾기
+                            echo "xmlFiles: ${xmlFiles}"
+
+                            // 디버깅: 찾은 파일 리스트 출력
+                            if (xmlFiles.length == 0) {
+                                error "No XML files found!"
+                            } else {
+                                echo "Found XML files: ${xmlFiles.collect { it.path }.join(', ')}"
+                            }
+
+                            // 각 XML 파일을 순회하며 테스트 케이스와 실패 메시지 추출
+                            xmlFiles.each { xmlFile ->
+                                echo "Processing file: ${xmlFile.path}"
+                                def xmlContent = readFile(xmlFile.path)
+                                echo "XML Content:\n${xmlContent}"  // XML 파일 내용 출력
+
+                                // 전체 테스트 스위트 결과 추출
+                                def testsuitesPattern = /<testsuites[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+                                def testsuitePattern = /<testsuite[^>]* disabled="([^"]+)" errors="([^"]+)" failures="([^"]+)" name="([^"]+)" skipped="([^"]+)" tests="([^"]+)" time="([^"]+)"/
+
+                                def testsuitesMatches = []
+                                def testsuiteMatches = []
+
+                                (xmlContent =~ testsuitesPattern).each { match ->
+                                    testsuitesMatches << match
+                                }
+
+                                (xmlContent =~ testsuitePattern).each { match ->
+                                    testsuiteMatches << match
+                                }
+
+                                testsuitesMatches.each { match ->
+                                    echo """
+                                    Overall Test Suites:
+                                    Disabled: ${match[1]}
+                                    Errors: ${match[2]}
+                                    Failures: ${match[3]}
+                                    Total Tests: ${match[4]}
+                                    Total Time: ${match[5]}
+                                    """
+                                }
+
+                                testsuiteMatches.each { match ->
+                                    echo """
+                                    Test Suite:
+                                    Name: ${match[4]}
+                                    Disabled: ${match[1]}
+                                    Errors: ${match[2]}
+                                    Failures: ${match[3]}
+                                    Skipped: ${match[5]}
+                                    Total Tests: ${match[6]}
+                                    Total Time: ${match[7]}
+                                    """
+                                }
+
+                                // 정규 표현식을 사용하여 classname, name, time, 실패 사유 추출
+                                def testCasePattern = /<testcase name="([^"]+)" classname="([^"]+)" time="([^"]+)"(?:>(.*?)<\/testcase>|\/>)/
+                                def failurePattern = /<failure message="([^"]+)" type="([^"]+)">(.*?)<\/failure>/
+                                def errorPattern = /<error message="([^"]+)" type="([^"]+)">(.*?)<\/error>/
+                                def skippedPattern = /<skipped\/>/
+
+                                def testCaseMatches = []
+
+                                (xmlContent =~ testCasePattern).each { match ->
+                                    testCaseMatches << match
+                                }
+
+                                testCaseMatches.each { match ->
+                                    def testName = match[1]
+                                    def className = match[2]
+                                    def time = match[3]
+                                    def testCaseContent = match[4] ?: ''
+                                    def failureMessage = ''
+                                    def errorMessage = ''
+                                    def skippedMessage = ''
+                                    def statusText = 'SUCCESS'
+                                    def issueStatusId = 1
+
+                                    // 실패 메시지 추출
+                                    def failureMatches = []
+                                    (testCaseContent =~ failurePattern).each { fmatch ->
+                                        failureMatches << fmatch
+                                    }
+                                    if (failureMatches) {
+                                        failureMatches.each { fmatch ->
+                                            failureMessage = "Failure: ${fmatch[1]}, Type: ${fmatch[2]}, Message: ${fmatch[3]}"
+                                            statusText = 'FAILURE'
+                                            issueStatusId = 2
+                                        }
+                                    }
+
+                                    // 오류 메시지 추출
+                                    def errorMatches = []
+                                    (testCaseContent =~ errorPattern).each { ematch ->
+                                        errorMatches << ematch
+                                    }
+                                    if (errorMatches) {
+                                        errorMatches.each { ematch ->
+                                            errorMessage = "Error: ${ematch[1]}, Type: ${ematch[2]}, Message: ${ematch[3]}"
+                                            statusText = 'ERROR'
+                                            issueStatusId = 3
+                                        }
+                                    }
+
+                                    // 스킵 메시지 확인
+                                    if (testCaseContent =~ skippedPattern) {
+                                        skippedMessage = "Test was skipped."
+                                        statusText = 'SKIPPED'
+                                        issueStatusId = 4
+                                    }
+
+                                    def issueSubject = "[${env.repoName}][Test_JUnit][${currentBuild.number}]-[${testName}:${statusText}]"
+                                    def issueDescription = """
+Test Case:
+Class: ${className}
+Name: ${testName}
+Time: ${time}
+${failureMessage}
+${errorMessage}
+${skippedMessage}
+"""
+                                    echo "${issueDescription}"
+
+                                    def redmineIssueData = [
+                                        issue: [
+                                            project_id: 6,
+                                            tracker_id: 7,
+                                            subject: issueSubject,
+                                            description: issueDescription
+                                        ]
+                                    ]
+
+                                    echo "${redmineIssueData}"
+
+                                    def response = httpRequest(
+                                        httpMode: 'POST',
+                                        url: 'http://redmine:3000/issues.json',
+                                        acceptType: 'APPLICATION_JSON',
+                                        contentType: 'APPLICATION_JSON',
+                                        customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                        requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                                    )
+                                }
+                            }
+                        }
+                    }      
+
+                    def htmlContent
+                    def zipFilePath
+                    def sourceDir
+                    // JaCoCo는 JUnit 테스트와 함께 실행되는 경우에만 리포트 생성 (Gradle & Maven 모두 가능)
+                    if (env.TEST_TOOL.contains('jacoco') && env.TEST_TOOL.contains('junit')) {
+                        try {
+                            if (env.BUILD_TOOL == 'gradle') {
+                                sh "cd ${env.FOLDER} && ./gradlew jacocoTestReport"
+                                htmlContent = readFile(file: 'build/jacocoHtml/index.html')
+                                zipFilePath = "build/jacocoHtml.zip"
+                                sourceDir = "build/jacocoHtml"
+                            } else if (env.BUILD_TOOL == 'maven') {
+                                sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn jacoco:report"
+                                htmlContent = readFile(file: 'target/site/jacoco/index.html')
+                                zipFilePath = "target/site/jacocoHtml.zip"
+                                sourceDir = "target/site/jacoco"
+                            }
+                        } catch (Exception e) {
+                            currentBuild.result = 'FAILURE'
+                        } finally {
+                            // Line Coverage와 Branch Coverage 추출
+                            def lineCoverage = "N/A"
+                            def branchCoverage = "N/A"
+
+                            // tfoot 부분 파싱
+                            def tfootStart = htmlContent.indexOf('<tfoot>')
+                            def tfootEnd = htmlContent.indexOf('</tfoot>') + 8
+
+                            def tfootContent = htmlContent.find(/<tfoot>.*?<\/tfoot>/)
+                            if (tfootContent) {
+                                // Line Coverage 추출
+                                def lineCoverageMatch = tfootContent.find(/<td>Total<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>/)
+                                if (lineCoverageMatch) {
+                                    lineCoverage = lineCoverageMatch.replaceAll(/.*<td>Total<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>.*/, '$1')
+                                }
+
+                                // Branch Coverage 추출
+                                def branchCoverageMatch = tfootContent.find(/<td class="ctr2">(\d+)%<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>/)
+                                if (branchCoverageMatch) {
+                                    branchCoverage = branchCoverageMatch.replaceAll(/.*<td class="ctr2">(\d+)%<\/td><td class="bar">[^<]+<\/td><td class="ctr2">(\d+)%<\/td>.*/, '$3')
+                                }
+                            }
+
+                            def cleanedHtmlContent = htmlContent.replaceAll(/<script[^>]*>.*?<\/script>/, '') // script 태그 제거
+                                            .replaceAll(/<title[^>]*>.*?<\/title>/, '')   // title 태그 제거
+                                            .replaceAll(/<img[^>]*>/, '')                // img 태그 제거
+                                            .replaceAll(/\s+/, ' ')    // 불필요한 공백 제거
+                                            .trim()
+
+                            // 이슈 생성 데이터 구성
+                            def issueSubject = "[${env.repoName}][Test_JaCoCo][${currentBuild.number}]-[Line:${lineCoverage}%/Branch:${branchCoverage}%]"
+
+                            def redmineIssueData = [
+                                issue: [
+                                    project_id: 6,
+                                    tracker_id: 12,
+                                    subject: issueSubject,
+                                    description: cleanedHtmlContent
+                                ]
+                            ]
+
+                            // Redmine 이슈 생성
+                            def createIssueResponse = httpRequest(
+                                httpMode: 'POST',
+                                url: 'http://redmine:3000/issues.json',
+                                acceptType: 'APPLICATION_JSON',
+                                contentType: 'APPLICATION_JSON',
+                                customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                            )
+
+                            // 생성된 이슈의 ID 추출
+                            def issueId = readJSON(text: createIssueResponse.content).issue.id
+                            echo "Created Issue ID: ${issueId}"
+
+                            // 2. zip 파일 생성
+                            zip zipFile: zipFilePath, archive: false, dir: sourceDir, overwrite: true
+
+                            // 3. 이슈에 zip 파일 첨부
+
+                            // Upload the file
+                            def uploadResponse = httpRequest(
+                                url: "http://redmine:3000/uploads.json",
+                                httpMode: 'POST',
+                                customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey], [name: 'Content-Type', value: 'application/octet-stream']],
+                                requestBody: readFile(file: zipFilePath, encoding: 'ISO-8859-1'),
+                                validResponseCodes: '201'
+                            )
+
+                            def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                            echo "Upload Token: ${uploadToken}"
+
+                            // Attach the file to the issue
+                            def attachmentData = [
+                                issue: [
+                                    uploads: [
+                                        [
+                                            token: uploadToken,
+                                            filename: 'jacocoHtml.zip',
+                                            content_type: 'application/zip'
+                                        ]
+                                    ]
+                                ]
+                            ]
+
+                            httpRequest(
+                                url: "http://redmine:3000/issues/${issueId}.json",
+                                httpMode: 'PUT',
+                                contentType: 'APPLICATION_JSON',
+                                customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                                requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                            )
+                        }
+                        //jacoco execPattern: "${env.FOLDER}/build/jacoco/*.exec", classPattern: "${env.FOLDER}/build/classes/java/main", sourcePattern: "${env.FOLDER}/src/main/java"
+
+                    }
+
+                    // OpenClover는 Maven에서만 실행 가능
+                    if (env.TEST_TOOL.contains('openclover') && env.BUILD_TOOL == 'maven') {
+                        sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn clover:setup test clover:aggregate clover:clover"
+                    }
+                }
+            }
+        }
+
+        // 4. Quality Gate 단계 (SonarQube 분석)
+        stage('Quality Gate') {
+            when {
+                expression { env.SONARQUBE_ANALYSIS == 'true' } // SonarQube 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    try {
+                        if (env.BUILD_TOOL == 'gradle') {
+                            // Gradle SonarQube 분석
+                            sh """
+                                cd ${env.FOLDER}
+                                ./gradlew -Dsonar.host.url=http://sonarqube:9000 -Dsonar.login=${sonarApiToken} -Dsonar.projectKey=${env.repoName} -Dsonar.projectName="${env.repoName}" -Dsonar.plugins.downloadOnlyRequired=true -Dsonar.java.binaries=build sonar
+                            """
+                        } else if (env.BUILD_TOOL == 'maven') {
+                            // Maven SonarQube 분석
+                            sh "cd ${env.FOLDER} && ${MVN_HOME}/bin/mvn sonar:sonar -Dsonar.host.url=http://sonarqube:9000 -Dsonar.login=${sonarApiToken} -Dsonar.projectKey=${env.repoName} -Dsonar.projectName=${env.repoName} -Dsonar.plugins.downloadOnlyRequired=true"
+                        } else {
+                            error "Unsupported build tool for SonarQube: ${env.BUILD_TOOL}. Pipeline stopped."
+                        }
+                    } catch (Exception e) {
+                        currentBuild.result = 'FAILURE'
+                    } finally {
+                        // SonarQube 프로젝트 검색
+                        def qualityGateProject = httpRequest(
+                            httpMode: 'GET',
+                            url: "http://sonarqube:9000/api/projects/search?projects=${env.repoName}",
+                            acceptType: 'APPLICATION_JSON',
+                            customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
+                        )
+                        def json_t = readJSON text: qualityGateProject.content
+                        def qualityGateTime = json_t.components[0].lastAnalysisDate
+                        
+                        // UTC 시간 -> UTC+9로 변환
+                        def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ")
+                        def parsedDate = dateFormat.parse(qualityGateTime)
+                        def calendar = java.util.Calendar.getInstance()
+                        calendar.setTime(parsedDate)
+                        def qualityGateTimeKST = dateFormat.format(calendar.getTime())
+                        
+                        // SonarQube Quality Gate 상태 조회
+                        def qualityGateResult = httpRequest(
+                            httpMode: 'GET',
+                            url: "http://sonarqube:9000/api/qualitygates/project_status?projectKey=${env.repoName}",
+                            acceptType: 'APPLICATION_JSON',
+                            customHeaders: [[name: 'Authorization', value: "Bearer ${sonarApiToken}"]]
+                        )
+                        
+                        def json = readJSON text: qualityGateResult.content
+                        def qualityGateStatus = json.projectStatus.status
+                        def conditions = json.projectStatus.conditions
+                        
+                        // overall / new 분리
+                        def overallConditions = conditions.findAll { !it.metricKey.contains("new") }
+                        def newConditions = conditions.findAll { it.metricKey.contains("new") }
+
+                        // 보고 방식 Metric : [] | Status : [] | Actual Value : [결과/조건]/[단위(%인 경우에만)]
+                        def formatCondition = { condition ->
+                            def actualValue = condition.actualValue ?: 'N/A'
+                            def errorThreshold = condition.errorThreshold ?: 'N/A'
+                            def unit = condition.comparator == 'LT' ? '%' : ''
+                            return "- Metric: ${condition.metricKey} | Status: ${condition.status} | Actual Value: ${actualValue}/${errorThreshold}${unit}"
+                        }
+                        
+                        // Redmine report
+
+                        def redmineIssueTitle = "[${env.repoName}][QualityGate][${currentBuild.number}]-[${qualityGateStatus}]"
+                        def redmineIssueDescription = """
+- QualityGate 결과: ${qualityGateStatus}
+
+[Overall]
+ ${overallConditions.collect { formatCondition(it) }.join('\n ')}
+
+---------------------------------
+
+[New]
+ ${newConditions.collect { formatCondition(it) }.join('\n ')}
+
+---------------------------------
+
+- 링크: http://localhost:9001/dashboard?id=${env.repoName}
+"""
+                        
+                        def redmineIssueData = [
+                            issue: [
+                                project_id: 6,
+                                tracker_id: 9,
+                                subject: redmineIssueTitle,
+                                description: redmineIssueDescription
+                            ]
+                        ]
+                        
+                        def response = httpRequest(
+                            httpMode: 'POST',
+                            url: 'http://redmine:3000/issues.json',
+                            acceptType: 'APPLICATION_JSON',
+                            contentType: 'APPLICATION_JSON',
+                            customHeaders: [[name: 'X-Redmine-API-Key', value: redmineApiKey]],
+                            requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                        )
+
+                        echo "Redmine Issue Created: ${response}"
+                    }
+                }
+            }
+        }
+
+/*
+        // 5. FOSSLight 단계
+        stage('FOSSLight') {
+            when {
+                expression { env.FOSSLIGHT == 'true' } // FOSSLight 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    sh """
+                        sudo apt-get update
+                        sudo apt-get install -y libmagic1 python3-dev build-essential
+                        python3 -m pip config set global.break-system-packages true
+                        echo "System dependencies installed"
+        
+                        pip3 install --upgrade pip
+                        pip3 install virtualenv
+                        pip3 install fosslight_scanner
+                        echo "Python 환경 및 fosslight 설치 완료"
+        
+                        cd ${env.FOLDER}
+                        virtualenv -p /usr/bin/python3.11 ./venv
+                        . ./venv/bin/activate
+                        which fosslight
+                        fosslight --version
+                        fosslight all -p . -o test-result
+                    """
+                }
+            }
+        }
+*/
+/*
+        // 6. SCACheck 단계(Dependency Check)
+        stage('SCACheck') {
+            when {
+                expression { env.SCACHECK == 'true' } // SonarQube 분석이 true로 설정된 경우에만 실행
+            }
+            steps {
+                script {
+                    def reportOutput = "${env.WORKSPACE}/dependency-check-report"
+
+                    // Dependency-Check 실행
+                    sh """
+                        echo "Dependency-Check Home: ${DEPENDENCY_CHECK_HOME}"
+                        ls -l ${DEPENDENCY_CHECK_HOME}/bin
+                        ${DEPENDENCY_CHECK_HOME}/bin/dependency-check.sh \
+                        --project "${env.repoName}" \
+                        --scan "${env.WORKSPACE}" \
+                        --format JSON \
+                        --format HTML \
+                        --format XML \
+                        --out "${reportOutput}" \
+                        --nvdApiKey ${NVD_API_KEY}
+                    """
+                }
+            }
+        }
+*/
+    }
+}
+

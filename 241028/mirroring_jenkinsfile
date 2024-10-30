@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+    environment {
+        GITEA_URL = "http://gitea:3000"
+        GITEA_TOKEN = "b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e"
+        GITEA_USER = "jinho.han"
+        GITEA_EMAIL = "jinho.han@kt.com"
+        GITHUB_REPO = "https://github.com/h03149/jenkins_option.git"
+        TTC_REPO = "http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/ttc.git"
+    }
+    stages {
+        stage('Clone GitHub Repo') {
+            steps {
+                script {
+                    def repoName = GITHUB_REPO.split('/')[-1].replace(".git", "")
+                    def giteaRepoUrl = "${GITEA_URL}/${GITEA_USER}/${repoName}.git"
+
+                    // Clean up the directory if it already exists
+                    sh "rm -rf ${repoName}"
+
+                    // Clone GitHub repo
+                    sh "git clone ${GITHUB_REPO} ${repoName}"
+
+                    // Check if Gitea repo exists
+                    def repoExists = sh(script: "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: token ${GITEA_TOKEN}' ${giteaRepoUrl}", returnStdout: true).trim() == '200'
+
+                    if (!repoExists) {
+                        // Create Gitea repo if it doesn't exist
+                        sh """
+                            curl -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d '{"name": "${repoName}"}' \
+                            ${GITEA_URL}/api/v1/user/repos
+                        """
+                    } else {
+                        // Clear existing Gitea repo content if it exists
+                        sh """
+                            git clone ${giteaRepoUrl} temp_repo
+                            cd temp_repo
+                            git rm -rf .
+                            git commit -m "Clear repository"
+                            git push --force
+                            cd ..
+                            rm -rf temp_repo
+                        """
+                    }
+
+                    // Push GitHub repo content to Gitea with --force
+                    sh """
+                        cd ${repoName}
+                        git remote add gitea ${giteaRepoUrl}
+                        git push -u gitea main --force
+                    """
+                }
+            }
+        }
+        stage('Merge TTC Repo') {
+            steps {
+                script {
+                    def repoName = GITHUB_REPO.split('/')[-1].replace(".git", "")
+                    def giteaRepoUrl = "${GITEA_URL}/${GITEA_USER}/${repoName}.git"
+
+                    // Clone TTC repo and copy contents
+                    sh """
+                        git clone ${TTC_REPO} ttc_repo
+                        cp -rf ttc_repo/* ${repoName}/
+                    """
+
+                    // Commit and push changes to Gitea
+                    sh """
+                        cd ${repoName}
+                        git config user.name "${GITEA_USER}"
+                        git config user.email "${GITEA_EMAIL}"
+                        git add .
+                        git commit -m "Merged TTC repo contents"
+                        git push gitea main --force
+                    """
+                }
+            }
+        }
+    }
+    post {
+        always {
+            // Clean up directories
+            cleanWs()
+        }
+    }
+}

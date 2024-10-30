@@ -1,0 +1,183 @@
+pipeline {
+    agent any
+
+    tools { nodejs "nodejs" }
+    
+    parameters {
+        string(name: 'urls', defaultValue: '', description: 'List of URLs to test with LHCI')
+    }
+
+    environment {
+        //urls = "https://www.kt.com/,https://www.tworld.co.kr/,https://www.lguplus.com/,https://ktds.com/,https://www.skcc.co.kr/,https://www.lgcns.com/"
+        redmineApiKey = credentials('redmine_api_key') // Jenkins credential store에서 Redmine API 키를 가져옵니다.
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                script {
+                    sh "git clone http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/lighthouse_ci.git ."
+                    sh "git config --global user.name 'jinho.han'"
+                    sh "git config --global user.email 'jinho.han@kt.com'"
+                    sh 'git config --global --add safe.directory ${WORKSPACE}'
+                    sh "git checkout master"
+
+                    def currentTime = new Date().format("MM.dd HH:mm")
+                    def logEntry = "Time: ${currentTime}\nURLs:\n${params.urls.split(',').join('\n')}\n"
+
+                    sh "echo '${logEntry}' >> log.txt"
+                    sh 'git add log.txt'
+                    sh "git commit -m '[${currentTime}]: ${params.urls.split(',')[0]} 외 ${params.urls.split(',').size() - 1}개'"
+
+                    sh 'git push http://b5789b14b9eaea265ed6c1b330a4a8ec2d33a51e@gitea:3000/jinho.han/lighthouse_ci.git'
+                }
+            }
+        }
+
+        stage('Prepare Environment') {
+            steps {
+                script {
+                    env.LHCI_BUILD_CONTEXT__CURRENT_HASH = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
+                    sh 'npm install -g @lhci/cli'
+                    sh 'npm install puppeteer'
+
+                    def urlList = params.urls.split(',').collect { "--collect.url=${it}" }.join(' ')
+                    sh "lhci autorun ${urlList}"
+                    //sh "lhci autorun"
+
+                    // Upload Lighthouse CI server
+                    sh 'lhci upload --target=lhci --serverBaseUrl="http://lhci:9003/" --token="55ea7616-03b7-4c3d-9975-31ccba0f86a2"'
+                }
+            }
+        }
+/*
+        stage('Create Redmine Issues') {
+            steps {
+                  script {
+                      def resultsDir = "./lighthouse-results"
+                      def manifest = readJSON file: "${resultsDir}/manifest.json"
+
+                      params.urls.split(',').each { url ->
+                          url = url.trim()
+
+                          echo "Checking URL: ${url}"
+                          echo "Manifest: ${manifest}"
+
+                          // 매니페스트의 URL을 정규화하여 비교
+                          def matchingEntries = manifest.findAll { manifestEntry ->
+                              def manifestUrl = manifestEntry.url
+                              if (!manifestUrl.endsWith('/')) {
+                                  manifestUrl += '/'
+                              }
+                              if (!url.endsWith('/')) {
+                                  url += '/'
+                              }
+                              return manifestUrl == url
+                          }
+
+                          echo "Matching Entries: ${matchingEntries}"
+                          def htmlPaths = matchingEntries.collect { it.htmlPath }
+
+                          if (htmlPaths.isEmpty()) {
+                              error "Could not find HTML report for URL: ${url}"
+                          }
+
+                          def hash = env.LHCI_BUILD_CONTEXT__CURRENT_HASH
+                          def performance = matchingEntries.collect { it.summary.performance }.sum() / matchingEntries.size() * 100
+                          def accessibility = matchingEntries.collect { it.summary.accessibility }.sum() / matchingEntries.size() * 100
+                          def bestPractices = matchingEntries.collect { it.summary['best-practices'] }.sum() / matchingEntries.size() * 100
+                          def seo = matchingEntries.collect { it.summary.seo }.sum() / matchingEntries.size() * 100
+
+                          def issueDescription = """
+결과
+. 성능 : ${performance}
+. 접근성 : ${accessibility}
+. 권장사항 : ${bestPractices}
+. 검색엔진 최적화 : ${seo}
+"""
+
+                          def issueSubject = "[Project][${env.JOB_NAME}][${currentBuild.number}]-[${url}]"
+                          def redmineIssueData = [
+                              issue: [
+                                  project_id: 6,
+                                  tracker_id: 11,
+                                  subject: issueSubject,
+                                  description: issueDescription
+                              ]
+                          ]
+
+                          // Redmine 이슈 생성
+                          def createIssueResponse = httpRequest(
+                              httpMode: 'POST',
+                              url: 'http://redmine:3000/issues.json',
+                              acceptType: 'APPLICATION_JSON',
+                              contentType: 'APPLICATION_JSON',
+                              customHeaders: [[name: 'X-Redmine-API-Key', value: env.REDMINE_API_KEY]],
+                              requestBody: groovy.json.JsonOutput.toJson(redmineIssueData)
+                          )
+
+                          def issueId = readJSON(text: createIssueResponse.content).issue.id
+                          echo "Created Issue ID: ${issueId}"
+
+                          def zipFilePath = "${resultsDir}/lighthouse-reports-${hash}.zip"
+                          def sourceDir = resultsDir
+                          
+                          // Ensure the Jenkins workspace has correct permissions
+                          sh "chmod -R 777 ${resultsDir}"
+
+                          // 파일명만 추출하여 상대 경로로 사용
+                          def relativeHtmlPaths = htmlPaths.collect { it.split('/').last() }.join(',')
+                          
+                          // HTML 파일들을 zip 파일로 압축
+                          zip zipFile: zipFilePath, archive: false, dir: sourceDir, glob: relativeHtmlPaths, overwrite: true
+
+                          // 3. 이슈에 zip 파일 첨부
+                          // Upload the file
+                          def uploadResponse = httpRequest(
+                              url: "http://redmine:3000/uploads.json",
+                              httpMode: 'POST',
+                              customHeaders: [[name: 'X-Redmine-API-Key', value: env.REDMINE_API_KEY], [name: 'Content-Type', value: 'application/octet-stream']],
+                              requestBody: readFile(file: zipFilePath, encoding: 'ISO-8859-1'),
+                              validResponseCodes: '201'
+                          )
+
+                          def uploadToken = readJSON(text: uploadResponse.content).upload.token
+                          echo "Upload Token: ${uploadToken}"
+
+                          // Attach the file to the issue
+                          def attachmentData = [
+                              issue: [
+                                  uploads: [
+                                      [
+                                          token: uploadToken,
+                                          filename: "lighthouse-reports-${hash}.zip",
+                                          content_type: 'application/zip'
+                                      ]
+                                  ]
+                              ]
+                          ]
+
+                          httpRequest(
+                              url: "http://redmine:3000/issues/${issueId}.json",
+                              httpMode: 'PUT',
+                              contentType: 'APPLICATION_JSON',
+                              customHeaders: [[name: 'X-Redmine-API-Key', value: env.REDMINE_API_KEY]],
+                              requestBody: groovy.json.JsonOutput.toJson(attachmentData)
+                          )
+                      }
+                }
+            }
+        }
+        */
+    }
+    
+    
+
+    post {
+        always {
+            cleanWs()
+            
+            //build job: 'TestToolchain/SCACheck', wait: false
+        }
+    }
+}
